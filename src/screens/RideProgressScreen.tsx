@@ -12,10 +12,13 @@ import { Colors, Shadow } from "../theme";
 import { postRideRequest, pollForAcceptance, clearRelayMessage, generateRideId } from "../services/api";
 import { WebRTCGPSAnswerer } from "../services/WebRTCGPS";
 
-const ESCROW_ADDR = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS ?? "0x31Fc72a2Fb4b3dbBE2c836225329247baA70D6F3";
-const POLYGON_RPC = "https://polygon-mainnet.g.alchemy.com/v2/Q25ZjjJ1haH3RxjFuVWuS";
-const MATCHING_WS = "ws://157.230.59.42:3000";
-const ESCROW_ABI  = [
+const ESCROW_ADDR   = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS        ?? "0x31Fc72a2Fb4b3dbBE2c836225329247baA70D6F3";
+const DRIVER_AVAIL  = process.env.EXPO_PUBLIC_DRIVER_AVAILABILITY_ADDRESS ?? "0xf61943cBc76f5074ff314Fd348FD3990E34f157f";
+const POLYGON_RPC   = "https://polygon-mainnet.g.alchemy.com/v2/Q25ZjjJ1haH3RxjFuVWuS";
+const MATCHING_HTTP = "http://157.230.59.42:3000";
+const MATCHING_WS   = "ws://157.230.59.42:3000";
+const AVAIL_ABI     = ["function isOnline(address) external view returns (bool)"];
+const ESCROW_ABI    = [
   "function createRide(bytes32,address,address,bytes32) external payable",
   "function confirmPickupByRider(bytes32) external",
   "function confirmRide(bytes32) external",
@@ -169,6 +172,31 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     }
   };
 
+  // Returns true if driver is online. Tries matching server first, falls back to blockchain.
+  const checkDriverOnline = async (driverAddr: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`${MATCHING_HTTP}/drivers/${driverAddr}/status`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // on_ride = driver accepted our ride and is still connected; locked = mid-confirmation
+        return data.online === true;
+      }
+    } catch { /* server unreachable — fall through to blockchain */ }
+
+    try {
+      const provider  = new ethers.JsonRpcProvider(POLYGON_RPC);
+      const avail     = new ethers.Contract(DRIVER_AVAIL, AVAIL_ABI, provider);
+      const online    = await avail.isOnline(driverAddr);
+      console.log(`[DRIVER] On-chain isOnline(${driverAddr.slice(0,8)}...):`, online);
+      return online as boolean;
+    } catch (e: any) {
+      console.warn("[DRIVER] isOnline check failed:", e.message);
+      return true; // assume online if both checks fail — don't block the ride
+    }
+  };
+
   const confirmWithServer = async (riderWallet: string) => {
     const driverAddr = driver.address?.length === 42
       ? driver.address
@@ -191,6 +219,18 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       const data = await res.json();
       console.log("/riders/confirm response:", JSON.stringify(data));
       if (!data.ok) { setStatus("failed"); return; }
+
+      // Driver accepted — double-check they're still connected before spending gas
+      const still = await checkDriverOnline(data.driverWallet ?? driverAddr);
+      if (!still) {
+        Alert.alert(
+          "Driver Unavailable",
+          "The driver went offline before the ride could start. Please search again.",
+          [{ text: "Back to Search", onPress: () => navigation.goBack() }],
+        );
+        setStatus("failed");
+        return;
+      }
 
       setFareUSD(data.fareUSD);
       await createEscrowRide(data.rideId, data.driverWallet, data.fareWei, data.arbitrator);
@@ -357,6 +397,19 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
           clearInterval(pollRef.interval!);
           pollRef.interval = null;
           console.log("[RELAY] Driver accepted:", accepted.rideId.slice(0, 10));
+
+          // Check driver still reachable before spending gas
+          const still = await checkDriverOnline(driverAddr);
+          if (!still) {
+            Alert.alert(
+              "Driver Unavailable",
+              "The driver went offline before the ride could start. Please search again.",
+              [{ text: "Back to Search", onPress: () => navigation.goBack() }],
+            );
+            setStatus("failed");
+            return;
+          }
+
           const estimatedFareWei = "1000000000000000"; // 0.001 POL — hardcoded for testing
           const arbitrator = "0x240c737D8a2380cf161D66C2cce7512dEdF7Aa4e";
           await createEscrowRide(newRideId, driverAddr, estimatedFareWei, arbitrator);
