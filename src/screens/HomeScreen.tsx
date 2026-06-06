@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ScrollView, Animated, TextInput, StatusBar,
+  ScrollView, Animated, TextInput, StatusBar, Alert,
 } from "react-native";
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -12,12 +12,21 @@ import { Colors, Typography, Spacing, Radius, Shadow } from "../theme";
 const ALCHEMY_URL         = process.env.EXPO_PUBLIC_ALCHEMY_URL                  ?? "";
 const DRIVER_AVAILABILITY = process.env.EXPO_PUBLIC_DRIVER_AVAILABILITY_ADDRESS  ?? "";
 const RIDE_ESCROW         = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS           ?? "";
+const NODE_REG_ADDR       = process.env.EXPO_PUBLIC_NODE_REGISTRY_ADDRESS         ?? "0xE8f8951cDcC4c6759A9E980b966D6742edcbAc59";
 const AVAILABILITY_ABI    = [
   "function getAvailableDrivers() external view returns (tuple(address wallet, int256 lat, int256 lng, string vehicle, uint256 rating, uint256 lastSeen, bool available)[])",
 ];
 const ESCROW_ABI = [
   "function hasActiveRide(address) external view returns (bool)",
 ];
+const NODE_REG_ABI = [
+  "function reportFailure(address nodeAddress) external",
+];
+
+// Base pricing constants — must match matching server defaults for independent verification
+const BASE_FARE_USD  = 1.50;
+const PER_KM_RATE    = 0.80;
+const FARE_TOLERANCE = 0.20; // 20% threshold triggers warning + report
 
 const MOCK_RECENT = [
   { id: "1", name: "Dayton Mall",          address: "2700 Miamisburg Centerville Rd" },
@@ -106,9 +115,36 @@ export const HomeScreen = ({ navigation }: any) => {
   const [multiplier, setMultiplier]   = useState(0.9);
   const [reason, setReason]           = useState("3 drivers nearby — good availability");
   const [riderLoc, setRiderLoc]       = useState({ lat: 39.7610, lng: -84.1890 });
+  const nodeAddressRef = useRef<string>("");
   const mapRef    = useRef<MapView>(null);
   const slideAnim = useRef(new Animated.Value(300)).current;
   const fadeAnim  = useRef(new Animated.Value(0)).current;
+
+  const reportNodeFailure = (nodeAddr: string) => {
+    if (!nodeAddr || !ethers.isAddress(nodeAddr)) return;
+    const provider = new ethers.JsonRpcProvider(ALCHEMY_URL);
+    // Use a read-only call — rider has no private key stored here.
+    // Reporting is best-effort; full report flow is handled in Task 6.
+    console.log("[NODE] Would report failure for node:", nodeAddr);
+  };
+
+  const verifyNodeFare = (quotedUSD: number, distanceKm: number, nodeAddr: string) => {
+    const expectedUSD = BASE_FARE_USD + distanceKm * PER_KM_RATE;
+    const ratio       = Math.abs(quotedUSD - expectedUSD) / expectedUSD;
+    console.log(`[FARE] Quoted: $${quotedUSD.toFixed(2)}, Expected: $${expectedUSD.toFixed(2)}, diff: ${(ratio * 100).toFixed(0)}%`);
+
+    if (ratio > FARE_TOLERANCE) {
+      if (ratio > FARE_TOLERANCE) reportNodeFailure(nodeAddr);
+      Alert.alert(
+        "Unusual Fare Detected",
+        `Node quoted $${quotedUSD.toFixed(2)} but our estimate is $${expectedUSD.toFixed(2)} for this distance (${(distanceKm * 0.621).toFixed(1)} mi).\n\nThis may indicate a pricing discrepancy.`,
+        [
+          { text: "Cancel Search", style: "destructive", onPress: () => setSearching(false) },
+          { text: "Continue Anyway", style: "default" },
+        ]
+      );
+    }
+  };
 
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
@@ -209,6 +245,9 @@ export const HomeScreen = ({ navigation }: any) => {
     .then(async data => {
       setLoading(false);
       if (data.drivers && data.drivers.length > 0) {
+        nodeAddressRef.current = data.nodeAddress ?? "";
+        const fareUSD = data.fare?.estimatedUSD ?? 3.25;
+        const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc.lat, riderLoc.lng, resolved.lat, resolved.lng);
         setDrivers(data.drivers.map((d: any) => ({
           address:    d.address,
           lat:        d.lat,
@@ -217,10 +256,12 @@ export const HomeScreen = ({ navigation }: any) => {
           rating:     d.rating ?? 4.8,
           eta:        d.etaMinutes ?? 3,
           distanceMi: ((d.distanceKm ?? 1) * 0.621).toFixed(1),
-          fareUSD:    data.fare?.estimatedUSD ?? 3.25,
+          fareUSD,
         })));
         setMultiplier(data.fare?.multiplier ?? 1.0);
         setReason(data.fare?.reason ?? "");
+        // Verify node's quoted fare against rider's independent calculation
+        verifyNodeFare(fareUSD, distKm, data.nodeAddress ?? "");
       } else {
         console.log("[SEARCH] Matching server returned no drivers — falling back to contract");
         await fetchFromContract(resolved);
