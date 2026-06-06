@@ -21,10 +21,6 @@ const ESCROW_ABI = [
   "function hasActiveRide(address) external view returns (bool)",
 ];
 const NODE_REG_ABI = [
-  "function reportFailure(address nodeAddress) external",
-];
-
-const NODE_REG_ABI = [
   "function getNodes(string geohash) external view returns (tuple(address operator, string endpoint, string geohash, bytes publicKey, uint256 stake, uint256 reputation, uint256 registeredAt, uint256 lastHeartbeat, bool active)[])",
   "function reportFailure(address nodeAddress) external",
 ];

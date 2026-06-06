@@ -10,6 +10,7 @@ import { ethers } from "ethers";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 import { postRideRequest, pollForAcceptance, clearRelayMessage, generateRideId } from "../services/api";
+import { WebRTCGPSAnswerer } from "../services/WebRTCGPS";
 
 const ESCROW_ADDR = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS ?? "0x31Fc72a2Fb4b3dbBE2c836225329247baA70D6F3";
 const POLYGON_RPC = "https://polygon-mainnet.g.alchemy.com/v2/Q25ZjjJ1haH3RxjFuVWuS";
@@ -46,9 +47,12 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   const [riderPos,  setRiderPos]  = useState({ lat: pickupLat, lng: pickupLng });
   const [elapsed, setElapsed]             = useState(0);
   const [actionLoading, setActionLoading] = useState(false);
-  const riderWalletRef = useRef("");
-  const privateKeyRef  = useRef("");
-  const fadeAnim  = useRef(new Animated.Value(0)).current;
+  const riderWalletRef       = useRef("");
+  const privateKeyRef        = useRef("");
+  const fadeAnim             = useRef(new Animated.Value(0)).current;
+  const isBlockchainFallback = useRef(false);
+  const webRTCAnswererRef    = useRef<WebRTCGPSAnswerer | null>(null);
+  const [usingWebRTC, setUsingWebRTC] = useState(false);
 
   useEffect(() => {
     console.log("RideProgress mounted");
@@ -95,9 +99,35 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     return () => { active = false; clearInterval(poll); };
   }, [rideId]);
 
-  // Connect to matching server WS for GPS relay and proof notification
+  // GPS relay: WebSocket when server available, WebRTC data channel in blockchain fallback mode
   useEffect(() => {
     if (!rideId || !riderWalletRef.current) return;
+
+    if (isBlockchainFallback.current) {
+      // Matching server was unreachable — use WebRTC P2P relay
+      const privateKey  = privateKeyRef.current;
+      const riderWallet = riderWalletRef.current;
+      if (!privateKey || !riderWallet) return;
+
+      const answerer = new WebRTCGPSAnswerer();
+      answerer.onGPSUpdate = (lat, lng) => {
+        setDriverLoc({ lat, lng });
+        setEta((e: number) => Math.max(0, e - 0.1));
+      };
+      answerer.onConnected    = () => setUsingWebRTC(true);
+      answerer.onDisconnected = () => setUsingWebRTC(false);
+      webRTCAnswererRef.current = answerer;
+
+      answerer.start(privateKey, riderWallet, rideId)
+        .catch((e: any) => console.warn("[WEBRTC] Answerer start failed:", e.message));
+
+      return () => {
+        webRTCAnswererRef.current?.stop();
+        webRTCAnswererRef.current = null;
+      };
+    }
+
+    // Normal path: matching server WebSocket
     const ws = new WebSocket(MATCHING_WS);
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: "RIDER_JOIN", rideId, address: riderWalletRef.current }));
@@ -166,8 +196,9 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       await createEscrowRide(data.rideId, data.driverWallet, data.fareWei, data.arbitrator);
 
     } catch {
-      // Matching server unreachable — fall back to MessageRelay
+      // Matching server unreachable — fall back to MessageRelay + WebRTC GPS
       console.log("[RELAY] Matching server unreachable — using MessageRelay fallback");
+      isBlockchainFallback.current = true;
       await fallbackViaRelay(driverAddr);
     }
   };
@@ -370,6 +401,14 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         </MapView>
       </View>
 
+      {usingWebRTC && (
+        <View style={styles.webrtcBanner}>
+          <Text style={styles.webrtcBannerText}>
+            Matching server unavailable. Map updates may be slower. Your payment is safe on blockchain.
+          </Text>
+        </View>
+      )}
+
       <View style={[styles.sheet, { backgroundColor: colors.surface, borderColor: colors.border }]}>
         <View style={styles.statusRow}>
           <Text style={{ fontSize: 32 }}>{statusCfg.emoji}</Text>
@@ -524,4 +563,7 @@ const styles = StyleSheet.create({
   disputeBtn:  { padding: 14, borderRadius: 14, borderWidth: 1.5, alignItems: "center" },
   successCard:         { padding: 20, borderRadius: 16, borderWidth: 1, alignItems: "center" },
   rideInProgressCard:  { padding: 20, borderRadius: 16, borderWidth: 1, alignItems: "center" },
+  webrtcBanner:        { backgroundColor: "rgba(255,153,0,0.92)", paddingHorizontal: 16,
+                         paddingVertical: 10 },
+  webrtcBannerText:    { color: "#000", fontSize: 11, textAlign: "center", fontWeight: "500" },
 });
