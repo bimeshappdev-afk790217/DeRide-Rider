@@ -11,7 +11,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 import { postRideRequest, pollForAcceptance, clearRelayMessage, generateRideId } from "../services/api";
 
-const ESCROW_ADDR = "0xd83804d9f16D1b64d1C44277D4BE9b0dE01C1322";
+const ESCROW_ADDR = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS ?? "0x31Fc72a2Fb4b3dbBE2c836225329247baA70D6F3";
 const POLYGON_RPC = "https://polygon-mainnet.g.alchemy.com/v2/Q25ZjjJ1haH3RxjFuVWuS";
 const MATCHING_WS = "ws://157.230.59.42:3000";
 const ESCROW_ABI  = [
