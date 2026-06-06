@@ -1,0 +1,527 @@
+import React, { useState, useEffect, useRef } from "react";
+import {
+  View, Text, StyleSheet, TouchableOpacity,
+  Animated, Alert, ActivityIndicator,
+} from "react-native";
+import MapView, { Marker } from 'react-native-maps';
+import * as Location from 'expo-location';
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { ethers } from "ethers";
+import { useTheme } from "../theme/ThemeContext";
+import { Colors, Shadow } from "../theme";
+import { postRideRequest, pollForAcceptance, clearRelayMessage, generateRideId } from "../services/api";
+
+const ESCROW_ADDR = "0xd83804d9f16D1b64d1C44277D4BE9b0dE01C1322";
+const POLYGON_RPC = "https://polygon-mainnet.g.alchemy.com/v2/Q25ZjjJ1haH3RxjFuVWuS";
+const MATCHING_WS = "ws://157.230.59.42:3000";
+const ESCROW_ABI  = [
+  "function createRide(bytes32,address,address,bytes32) external payable",
+  "function confirmPickupByRider(bytes32) external",
+  "function confirmRide(bytes32) external",
+  "function disputeRide(bytes32) external",
+  "function getRideStatus(bytes32) external view returns (uint8)",
+];
+
+export const RideProgressScreen = ({ route, navigation }: any) => {
+  const { colors } = useTheme();
+  const { driver, destination, pickupLat, pickupLng, destLat, destLng } = route.params;
+
+  type Status =
+    | "confirming"          // calling /riders/confirm HTTP
+    | "creating_escrow"     // calling createRide on blockchain
+    | "waiting_pickup"      // showing PIN, waiting for pickup confirmation
+    | "driver_arriving"     // pickup confirmed, driver en route
+    | "pending_confirmation"// driver submitted proof
+    | "completed"           // rider confirmed ride
+    | "disputed"            // rider raised dispute
+    | "failed";
+
+  const [status, setStatus]       = useState<Status>("confirming");
+  const [rideId, setRideId]       = useState<string | null>(null);
+  const [pin, setPin]             = useState<number | null>(null);
+  const [txHash, setTxHash]       = useState<string | null>(null);
+  const [fareUSD, setFareUSD]     = useState(driver.fareUSD ?? 0);
+  const [eta, setEta]             = useState(driver.eta ?? 5);
+  const [driverLoc, setDriverLoc] = useState({ lat: pickupLat + 0.005, lng: pickupLng + 0.005 });
+  const [riderPos,  setRiderPos]  = useState({ lat: pickupLat, lng: pickupLng });
+  const [elapsed, setElapsed]             = useState(0);
+  const [actionLoading, setActionLoading] = useState(false);
+  const riderWalletRef = useRef("");
+  const privateKeyRef  = useRef("");
+  const fadeAnim  = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    console.log("RideProgress mounted");
+    console.log("Params:", JSON.stringify(route.params));
+    Animated.timing(fadeAnim, { toValue: 1, duration: 500, useNativeDriver: true }).start();
+    loadWalletAndStart();
+    (async () => {
+      try {
+        const { status: perm } = await Location.requestForegroundPermissionsAsync();
+        if (perm === "granted") {
+          const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+          setRiderPos({ lat: loc.coords.latitude, lng: loc.coords.longitude });
+        }
+      } catch { /* keep param coords */ }
+    })();
+  }, []);
+
+  // Ride timer — starts when rider confirms pickup
+  useEffect(() => {
+    if (status !== "driver_arriving") return;
+    const timer = setInterval(() => setElapsed(e => e + 1), 1000);
+    return () => clearInterval(timer);
+  }, [status]);
+
+  // Poll RideEscrow.getRideStatus() every 5s after escrow is created
+  useEffect(() => {
+    if (!rideId) return;
+    const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+    const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, provider);
+    let active = true;
+    const poll = setInterval(async () => {
+      try {
+        const s = Number(await escrow.getRideStatus(rideId));
+        console.log("[POLL] rideStatus:", s);
+        if (!active) return;
+        if (s === 1) { console.log("[POLL] Updating UI to InProgress"); setStatus("driver_arriving"); } // InProgress — pickup confirmed
+        if (s === 2) setStatus("pending_confirmation"); // PendingConfirmation
+        if (s === 4) { clearInterval(poll); setStatus("completed"); }   // Completed
+        if (s === 5) { clearInterval(poll); setStatus("disputed"); }    // Disputed
+      } catch (e: any) {
+        console.warn("[POLL] getRideStatus error:", e.message);
+      }
+    }, 5000);
+    return () => { active = false; clearInterval(poll); };
+  }, [rideId]);
+
+  // Connect to matching server WS for GPS relay and proof notification
+  useEffect(() => {
+    if (!rideId || !riderWalletRef.current) return;
+    const ws = new WebSocket(MATCHING_WS);
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: "RIDER_JOIN", rideId, address: riderWalletRef.current }));
+    };
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "DRIVER_LOCATION") {
+          setDriverLoc({ lat: msg.lat, lng: msg.lng });
+          setEta((e: number) => Math.max(0, e - 0.1));
+        }
+        if (msg.type === "PROOF_SUBMITTED") {
+          setStatus("pending_confirmation");
+        }
+      } catch { /* ignore parse errors */ }
+    };
+    return () => ws.close();
+  }, [rideId]);
+
+  const loadWalletAndStart = async () => {
+    try {
+      console.log("loadWalletAndStart: reading AsyncStorage...");
+      const addr = await AsyncStorage.getItem("rider_wallet_address") ?? "";
+      const key  = await AsyncStorage.getItem("rider_wallet_key")     ?? "";
+      console.log("Wallet loaded, addr:", addr ? addr.slice(0, 10) + "..." : "MISSING");
+      console.log("Key loaded:", key ? "yes" : "MISSING");
+      riderWalletRef.current = addr;
+      privateKeyRef.current  = key;
+      // Clear any leftover relay messages before starting a new ride
+      if (key) {
+        console.log("[RELAY] Clearing stale rider messages before new ride");
+        clearRelayMessage(key).catch(() => {});
+      }
+      await confirmWithServer(addr);
+    } catch (err: any) {
+      console.error("Mount error:", err.message);
+      console.error("Stack:", err.stack);
+      setStatus("failed");
+    }
+  };
+
+  const confirmWithServer = async (riderWallet: string) => {
+    const driverAddr = driver.address?.length === 42
+      ? driver.address
+      : "0x240c737D8a2380cf161D66C2cce7512dEdF7Aa4e";
+
+    console.log("Calling /riders/confirm...");
+    console.log("riderWallet:", riderWallet ? riderWallet.slice(0, 10) + "..." : "MISSING");
+    console.log("driverAddr:", driverAddr.slice(0, 10) + "...");
+
+    try {
+      const res = await fetch("http://157.230.59.42:3000/riders/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          riderAddress:  riderWallet,
+          driverAddress: driverAddr,
+          pickupLat, pickupLng, destLat, destLng,
+        }),
+      });
+      const data = await res.json();
+      console.log("/riders/confirm response:", JSON.stringify(data));
+      if (!data.ok) { setStatus("failed"); return; }
+
+      setFareUSD(data.fareUSD);
+      await createEscrowRide(data.rideId, data.driverWallet, data.fareWei, data.arbitrator);
+
+    } catch {
+      // Matching server unreachable — fall back to MessageRelay
+      console.log("[RELAY] Matching server unreachable — using MessageRelay fallback");
+      await fallbackViaRelay(driverAddr);
+    }
+  };
+
+  const createEscrowRide = async (
+    newRideId:    string,
+    driverWallet: string,
+    fareWei:      string,
+    arbitrator:   string,
+  ) => {
+    setStatus("creating_escrow");
+    try {
+      const key = privateKeyRef.current;
+      if (!key) throw new Error("No wallet key");
+
+      // Generate 4-digit PIN and hash it
+      const newPin  = Math.floor(Math.random() * 9000) + 1000;
+      const pinHash = ethers.solidityPackedKeccak256(["uint256"], [newPin]);
+
+      const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+      const signer   = new ethers.Wallet(key, provider);
+      const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
+
+      console.log("[ESCROW] createRide:", newRideId.slice(0,10), "fareWei:", fareWei, "PIN:", newPin);
+      const tx = await escrow.createRide(
+        newRideId,
+        driverWallet,
+        arbitrator,
+        pinHash,
+        { value: BigInt(fareWei) }
+      );
+      console.log("[ESCROW] createRide tx:", tx.hash);
+      await tx.wait();
+      console.log("[ESCROW] createRide confirmed, PIN:", newPin);
+
+      setRideId(newRideId);
+      setPin(newPin);
+      setTxHash(tx.hash);
+      setStatus("waiting_pickup");
+
+    } catch (err: any) {
+      console.error("[ESCROW] createRide failed:", err.message);
+      Alert.alert("Escrow Error", err.message);
+      setStatus("failed");
+    }
+  };
+
+  const handleConfirmPickup = async () => {
+    if (!rideId) return;
+    setActionLoading(true);
+    try {
+      const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+      const signer   = new ethers.Wallet(privateKeyRef.current, provider);
+      const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
+      const tx = await escrow.confirmPickupByRider(rideId);
+      await tx.wait();
+
+      // Notify matching server so driver receives PICKUP_CONFIRMED
+      fetch("http://157.230.59.42:3000/riders/pickup-confirmed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rideId }),
+      }).catch(e => console.warn("[PICKUP] notify failed:", e.message));
+
+      setStatus("driver_arriving");
+    } catch (err: any) {
+      Alert.alert("Error", err.message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleConfirmRide = async () => {
+    console.log("Confirm ride tapped");
+    if (!rideId) return;
+    setActionLoading(true);
+    try {
+      console.log("Confirming ride...");
+      const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+      const signer   = new ethers.Wallet(privateKeyRef.current, provider);
+      const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
+      const tx = await escrow.confirmRide(rideId);
+      console.log("TX hash:", tx.hash);
+      await tx.wait();
+      setStatus("completed");
+      console.log("Status after confirm:", "completed");
+    } catch (err: any) {
+      Alert.alert("Error", err.message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDisputeRide = async () => {
+    if (!rideId) return;
+    Alert.alert("Raise Dispute", "Are you sure you want to dispute this ride?", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Dispute", style: "destructive", onPress: async () => {
+        setActionLoading(true);
+        try {
+          const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+          const signer   = new ethers.Wallet(privateKeyRef.current, provider);
+          const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
+          const tx = await escrow.disputeRide(rideId);
+          await tx.wait();
+          setStatus("disputed");
+        } catch (err: any) {
+          Alert.alert("Error", err.message);
+        } finally {
+          setActionLoading(false);
+        }
+      }},
+    ]);
+  };
+
+  const fallbackViaRelay = async (driverAddr: string) => {
+    try {
+      const privateKey  = privateKeyRef.current;
+      const riderWallet = riderWalletRef.current;
+      if (!privateKey) { setStatus("failed"); return; }
+
+      // Generate rideId upfront so we can verify acceptance matches this exact ride
+      const newRideId = await generateRideId();
+      setRideId(newRideId); // set early so WS effect connects
+
+      console.log("[RELAY] Posting ride request to driver:", driverAddr.slice(0, 10));
+      await postRideRequest(
+        driverAddr, riderWallet, privateKey,
+        pickupLat, pickupLng, destLat, destLng,
+        driver.fareUSD,
+        newRideId,
+      );
+      console.log("[RELAY] Request posted, rideId:", newRideId.slice(0, 10), "— polling for acceptance...");
+
+      const ACCEPTANCE_TIMEOUT = 90000;
+      const startTime = Date.now();
+      const pollRef = { interval: null as ReturnType<typeof setInterval> | null };
+      pollRef.interval = setInterval(async () => {
+        if (Date.now() - startTime > ACCEPTANCE_TIMEOUT) {
+          clearInterval(pollRef.interval!);
+          pollRef.interval = null;
+          setStatus("failed");
+          Alert.alert(
+            "No Response",
+            "Driver didn't respond. Please try again.",
+            [{ text: "OK", onPress: () => navigation.goBack() }]
+          );
+          return;
+        }
+        const accepted = await pollForAcceptance(riderWallet, privateKey);
+        if (accepted) {
+          if (accepted.rideId !== newRideId) {
+            console.log("[RELAY] Ignoring stale acceptance — rideId mismatch");
+            return;
+          }
+          clearInterval(pollRef.interval!);
+          pollRef.interval = null;
+          console.log("[RELAY] Driver accepted:", accepted.rideId.slice(0, 10));
+          const estimatedFareWei = "1000000000000000"; // 0.001 POL — hardcoded for testing
+          const arbitrator = "0x240c737D8a2380cf161D66C2cce7512dEdF7Aa4e";
+          await createEscrowRide(newRideId, driverAddr, estimatedFareWei, arbitrator);
+        }
+      }, 3000);
+
+    } catch (err: any) {
+      console.error("[RELAY] Fallback failed:", err.message);
+      setStatus("failed");
+    }
+  };
+
+  const statusCfg = {
+    confirming:           { emoji: "⏳", title: "Finding driver...",             sub: "Connecting to server" },
+    creating_escrow:      { emoji: "🔗", title: "Creating escrow...",            sub: "Locking fare on Polygon" },
+    waiting_pickup:       { emoji: "📍", title: "Driver is on the way",          sub: "Show PIN to driver at pickup" },
+    driver_arriving:      { emoji: "🚗", title: "Ride in Progress",                        sub: driver.vehicle },
+    pending_confirmation: { emoji: "✋", title: "Confirm your ride",             sub: "Driver has completed the route" },
+    completed:            { emoji: "✅", title: "You've arrived!",               sub: "Payment released" },
+    disputed:             { emoji: "⚠️", title: "Dispute raised",               sub: "DeRide Foundation will review" },
+    failed:               { emoji: "❌", title: "Something went wrong",          sub: "Please try again" },
+  }[status];
+
+  return (
+    <Animated.View style={[styles.container, { backgroundColor: colors.bg, opacity: fadeAnim }]}>
+      <View style={styles.mapArea}>
+        <MapView
+          style={StyleSheet.absoluteFillObject}
+          region={{
+            latitude:       (riderPos.lat + driverLoc.lat) / 2,
+            longitude:      (riderPos.lng + driverLoc.lng) / 2,
+            latitudeDelta:  Math.abs(riderPos.lat - driverLoc.lat) * 3 + 0.01,
+            longitudeDelta: Math.abs(riderPos.lng - driverLoc.lng) * 3 + 0.01,
+          }}
+        >
+          <Marker coordinate={{ latitude: riderPos.lat, longitude: riderPos.lng }}
+            title="You" pinColor="#007AFF" />
+          {(status === "driver_arriving" || status === "pending_confirmation") && (
+            <Marker coordinate={{ latitude: driverLoc.lat, longitude: driverLoc.lng }}
+              title="Driver" pinColor="#00E5A0" />
+          )}
+        </MapView>
+      </View>
+
+      <View style={[styles.sheet, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+        <View style={styles.statusRow}>
+          <Text style={{ fontSize: 32 }}>{statusCfg.emoji}</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.statusTitle, { color: colors.text }]}>{statusCfg.title}</Text>
+            <Text style={[{ color: colors.textSub, fontSize: 13, marginTop: 2 }]}>{statusCfg.sub}</Text>
+          </View>
+        </View>
+
+        <View style={[styles.details, { borderColor: colors.border }]}>
+          <View style={styles.detailItem}>
+            <Text style={[styles.detailLabel, { color: colors.textSub }]}>Fare</Text>
+            <Text style={[styles.detailValue, { color: Colors.brand }]}>${fareUSD}</Text>
+          </View>
+          <View style={[{ width: 1, marginHorizontal: 8, backgroundColor: colors.border }]} />
+          <View style={styles.detailItem}>
+            <Text style={[styles.detailLabel, { color: colors.textSub }]}>Rating</Text>
+            <Text style={[styles.detailValue, { color: colors.text }]}>⭐ {driver.rating}</Text>
+          </View>
+          <View style={[{ width: 1, marginHorizontal: 8, backgroundColor: colors.border }]} />
+          <View style={styles.detailItem}>
+            <Text style={[styles.detailLabel, { color: colors.textSub }]}>To</Text>
+            <Text style={[styles.detailValue, { color: colors.text }]} numberOfLines={1}>
+              {destination?.slice(0, 10)}{destination?.length > 10 ? "..." : ""}
+            </Text>
+          </View>
+        </View>
+
+        {/* PIN display */}
+        {status === "waiting_pickup" && pin !== null && (
+          <View style={[styles.pinCard, { backgroundColor: Colors.brandGlow, borderColor: Colors.brand }]}>
+            <Text style={[{ color: Colors.brandDim, fontSize: 11, fontWeight: "600",
+              letterSpacing: 1, textTransform: "uppercase", marginBottom: 6 }]}>
+              Pickup PIN — show to driver
+            </Text>
+            <Text style={[styles.pinText, { color: Colors.brand }]}>{pin}</Text>
+            <TouchableOpacity
+              style={[styles.pickupBtn, { borderColor: Colors.brand, opacity: actionLoading ? 0.7 : 1 }]}
+              onPress={handleConfirmPickup}
+              disabled={actionLoading}
+            >
+              {actionLoading
+                ? <ActivityIndicator color={Colors.brand} />
+                : <Text style={[{ color: Colors.brand, fontSize: 14, fontWeight: "600" }]}>
+                    I'm in the car ✓
+                  </Text>
+              }
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Confirm / Dispute buttons after driver submits proof */}
+        {status === "pending_confirmation" && (
+          <View style={{ gap: 10 }}>
+            <TouchableOpacity
+              style={[styles.confirmBtn, Shadow.brand, actionLoading && { opacity: 0.7 }]}
+              onPress={handleConfirmRide}
+              disabled={actionLoading}
+            >
+              {actionLoading
+                ? <ActivityIndicator color="#000" />
+                : <Text style={[{ color: "#000", fontSize: 16, fontWeight: "700" }]}>
+                    Confirm Ride ✓
+                  </Text>
+              }
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.disputeBtn, { borderColor: "#FF4444" }]}
+              onPress={handleDisputeRide}
+              disabled={actionLoading}
+            >
+              <Text style={[{ color: "#FF4444", fontSize: 14, fontWeight: "600" }]}>
+                Dispute Ride ⚠
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {txHash && status === "waiting_pickup" && (
+          <Text style={[{ color: colors.textMuted, fontSize: 10, textAlign: "center", marginTop: 8 }]}>
+            Escrow: {txHash.slice(0, 20)}...
+          </Text>
+        )}
+
+        {status === "completed" && (
+          <View>
+            <View style={[styles.successCard, { backgroundColor: Colors.brandGlow, borderColor: Colors.brand }]}>
+              <Text style={[{ color: Colors.brand, fontSize: 20, fontWeight: "700" }]}>✓ Ride Complete</Text>
+              <Text style={[{ color: Colors.brandDim, fontSize: 13, marginTop: 4 }]}>
+                Payment released · ${fareUSD}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[{ padding: 20, borderRadius: 16, alignItems: "center", marginTop: 12,
+                backgroundColor: colors.surfaceAlt }]}
+              onPress={() => navigation.navigate("Main")}
+            >
+              <Text style={[{ color: colors.text, fontSize: 16, fontWeight: "700" }]}>Done</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {status === "disputed" && (
+          <View style={[styles.successCard, { backgroundColor: "#1a0000", borderColor: "#FF4444" }]}>
+            <Text style={[{ color: "#FF4444", fontSize: 16, fontWeight: "700" }]}>Dispute Submitted</Text>
+            <Text style={[{ color: colors.textSub, fontSize: 13, marginTop: 6, textAlign: "center" }]}>
+              DeRide Foundation will review and resolve within 24 hours.
+            </Text>
+          </View>
+        )}
+
+        {status === "failed" && (
+          <TouchableOpacity
+            style={[{ padding: 20, borderRadius: 16, alignItems: "center", backgroundColor: Colors.brand }]}
+            onPress={() => navigation.goBack()}
+          >
+            <Text style={[{ color: "#000", fontSize: 16, fontWeight: "700" }]}>Try Again</Text>
+          </TouchableOpacity>
+        )}
+
+        {status === "driver_arriving" && (
+          <View style={[styles.rideInProgressCard, { backgroundColor: Colors.brandGlow, borderColor: Colors.brand }]}>
+            <Text style={[{ color: Colors.brandDim, fontSize: 11, fontWeight: "600",
+              letterSpacing: 1, textTransform: "uppercase", marginBottom: 4 }]}>
+              Elapsed Time
+            </Text>
+            <Text style={[{ color: Colors.brand, fontSize: 40, fontWeight: "700", letterSpacing: 4 }]}>
+              {`${Math.floor(elapsed / 60).toString().padStart(2, "0")}:${(elapsed % 60).toString().padStart(2, "0")}`}
+            </Text>
+          </View>
+        )}
+      </View>
+    </Animated.View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container:   { flex: 1 },
+  mapArea:     { flex: 1 },
+  sheet:       { borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                 borderWidth: 1, borderBottomWidth: 0, padding: 24, paddingBottom: 40 },
+  statusRow:   { flexDirection: "row", alignItems: "center", gap: 16, marginBottom: 20 },
+  statusTitle: { fontSize: 18, fontWeight: "700" },
+  details:     { flexDirection: "row", borderWidth: 1, borderRadius: 16, padding: 16, marginBottom: 16 },
+  detailItem:  { flex: 1, alignItems: "center" },
+  detailLabel: { fontSize: 11, marginBottom: 4 },
+  detailValue: { fontSize: 16, fontWeight: "700" },
+  pinCard:     { padding: 20, borderRadius: 16, borderWidth: 1, alignItems: "center", marginBottom: 12 },
+  pinText:     { fontSize: 48, fontWeight: "700", letterSpacing: 8, marginBottom: 16 },
+  pickupBtn:   { borderWidth: 1.5, borderRadius: 12, paddingHorizontal: 20, paddingVertical: 10 },
+  confirmBtn:  { backgroundColor: "#00E5A0", padding: 18, borderRadius: 14, alignItems: "center" },
+  disputeBtn:  { padding: 14, borderRadius: 14, borderWidth: 1.5, alignItems: "center" },
+  successCard:         { padding: 20, borderRadius: 16, borderWidth: 1, alignItems: "center" },
+  rideInProgressCard:  { padding: 20, borderRadius: 16, borderWidth: 1, alignItems: "center" },
+});

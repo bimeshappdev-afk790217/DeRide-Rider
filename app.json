@@ -20,6 +20,11 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      ["expo-location", {
+        "locationWhenInUsePermission": "DeRide needs your location to find nearby riders"
+      }]
+    ]
   }
 }
