@@ -24,6 +24,11 @@
     "plugins": [
       ["expo-location", {
         "locationWhenInUsePermission": "DeRide needs your location to find nearby riders"
+      }],
+      ["expo-notifications", {
+        "icon": "./assets/icon.png",
+        "color": "#00E5A0",
+        "sounds": []
       }]
     ]
   }
