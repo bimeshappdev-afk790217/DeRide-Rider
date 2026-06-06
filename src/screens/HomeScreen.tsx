@@ -5,6 +5,7 @@ import {
 } from "react-native";
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { ethers } from "ethers";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Typography, Spacing, Radius, Shadow } from "../theme";
@@ -23,10 +24,29 @@ const NODE_REG_ABI = [
   "function reportFailure(address nodeAddress) external",
 ];
 
+const NODE_REG_ABI = [
+  "function getNodes(string geohash) external view returns (tuple(address operator, string endpoint, string geohash, bytes publicKey, uint256 stake, uint256 reputation, uint256 registeredAt, uint256 lastHeartbeat, bool active)[])",
+  "function reportFailure(address nodeAddress) external",
+];
+
 // Base pricing constants — must match matching server defaults for independent verification
 const BASE_FARE_USD  = 1.50;
 const PER_KM_RATE    = 0.80;
 const FARE_TOLERANCE = 0.20; // 20% threshold triggers warning + report
+
+function encodeGeohash(lat: number, lng: number, precision = 4): string {
+  const B32 = "0123456789bcdefghjkmnpqrstuvwxyz";
+  let [minLat, maxLat, minLng, maxLng] = [-90, 90, -180, 180];
+  let hash = "", bits = 0, val = 0, isLng = true;
+  while (hash.length < precision) {
+    const mid = isLng ? (minLng + maxLng) / 2 : (minLat + maxLat) / 2;
+    if (isLng) { if (lng > mid) { val = (val << 1) | 1; minLng = mid; } else { val <<= 1; maxLng = mid; } }
+    else        { if (lat > mid) { val = (val << 1) | 1; minLat = mid; } else { val <<= 1; maxLat = mid; } }
+    isLng = !isLng;
+    if (++bits === 5) { hash += B32[val]; bits = 0; val = 0; }
+  }
+  return hash;
+}
 
 const MOCK_RECENT = [
   { id: "1", name: "Dayton Mall",          address: "2700 Miamisburg Centerville Rd" },
@@ -122,10 +142,16 @@ export const HomeScreen = ({ navigation }: any) => {
 
   const reportNodeFailure = (nodeAddr: string) => {
     if (!nodeAddr || !ethers.isAddress(nodeAddr)) return;
-    const provider = new ethers.JsonRpcProvider(ALCHEMY_URL);
-    // Use a read-only call — rider has no private key stored here.
-    // Reporting is best-effort; full report flow is handled in Task 6.
-    console.log("[NODE] Would report failure for node:", nodeAddr);
+    // Fire-and-forget: rider signs with stored key
+    AsyncStorage.getItem("rider_wallet_key").then(key => {
+      if (!key || !ALCHEMY_URL) return;
+      const provider  = new ethers.JsonRpcProvider(ALCHEMY_URL);
+      const signer    = new ethers.Wallet(key, provider);
+      const nodeReg   = new ethers.Contract(NODE_REG_ADDR, NODE_REG_ABI, signer);
+      nodeReg.reportFailure(nodeAddr, { gasLimit: 200_000 })
+        .then((tx: any) => console.log("[NODE] reportFailure tx:", tx.hash))
+        .catch((e: any) => console.warn("[NODE] reportFailure failed:", e.message));
+    }).catch(() => {});
   };
 
   const verifyNodeFare = (quotedUSD: number, distanceKm: number, nodeAddr: string) => {
@@ -134,7 +160,7 @@ export const HomeScreen = ({ navigation }: any) => {
     console.log(`[FARE] Quoted: $${quotedUSD.toFixed(2)}, Expected: $${expectedUSD.toFixed(2)}, diff: ${(ratio * 100).toFixed(0)}%`);
 
     if (ratio > FARE_TOLERANCE) {
-      if (ratio > FARE_TOLERANCE) reportNodeFailure(nodeAddr);
+      reportNodeFailure(nodeAddr);
       Alert.alert(
         "Unusual Fare Detected",
         `Node quoted $${quotedUSD.toFixed(2)} but our estimate is $${expectedUSD.toFixed(2)} for this distance (${(distanceKm * 0.621).toFixed(1)} mi).\n\nThis may indicate a pricing discrepancy.`,
@@ -173,6 +199,131 @@ export const HomeScreen = ({ navigation }: any) => {
     }, 350);
     return () => clearTimeout(t);
   }, [destCoords, searching]);
+
+  const queryNodesFromRegistry = async (resolved: { lat: number; lng: number }): Promise<boolean> => {
+    if (!ALCHEMY_URL) return false;
+    try {
+      const provider = new ethers.JsonRpcProvider(ALCHEMY_URL);
+      const registry = new ethers.Contract(NODE_REG_ADDR, NODE_REG_ABI, provider);
+      const geohash  = encodeGeohash(riderLoc.lat, riderLoc.lng);
+      console.log("[NODE] Querying NodeRegistry for geohash:", geohash);
+
+      const rawNodes = await Promise.race([
+        registry.getNodes(geohash),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 6000)),
+      ]) as any[];
+
+      if (!rawNodes || rawNodes.length === 0) {
+        console.log("[NODE] No registered nodes for geohash:", geohash);
+        return false;
+      }
+
+      const sortedNodes = [...rawNodes]
+        .filter((n: any) => n.active)
+        .sort((a: any, b: any) => Number(b.reputation) - Number(a.reputation));
+
+      console.log(`[NODE] Found ${sortedNodes.length} node(s) in registry`);
+
+      // Get blockchain driver list for cross-reference
+      let blockchainAddresses = new Set<string>();
+      try {
+        const avail   = new ethers.Contract(DRIVER_AVAILABILITY, AVAILABILITY_ABI, provider);
+        const onChain = await avail.getAvailableDrivers();
+        blockchainAddresses = new Set(onChain.map((d: any) => (d.wallet as string).toLowerCase()));
+        console.log(`[NODE] ${blockchainAddresses.size} driver(s) on-chain`);
+      } catch (e: any) {
+        console.warn("[NODE] DriverAvailability read failed:", e.message);
+      }
+
+      const allDrivers = new Map<string, any>(); // wallet → driver object
+      let   combinedFareUSD = 0;
+      let   combinedDistKm  = 0;
+      let   anySucceeded    = false;
+
+      for (const node of sortedNodes) {
+        const httpBase = (node.endpoint as string).replace(/^ws(s?):\/\//, "http$1://");
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 5000);
+          const resp = await fetch(`${httpBase}/riders/search`, {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify({ lat: riderLoc.lat, lng: riderLoc.lng, destLat: resolved.lat, destLng: resolved.lng }),
+            signal:  ctrl.signal,
+          });
+          clearTimeout(timer);
+
+          const data = await resp.json();
+          if (!data.drivers || data.drivers.length === 0) continue;
+
+          anySucceeded = true;
+          const fareUSD = data.fare?.estimatedUSD ?? 3.25;
+          const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc.lat, riderLoc.lng, resolved.lat, resolved.lng);
+          if (!combinedFareUSD) { combinedFareUSD = fareUSD; combinedDistKm = distKm; }
+
+          let phantomCount = 0;
+          for (const d of data.drivers) {
+            const key = (d.address as string).toLowerCase();
+            // Cross-reference: node advertising a driver not on blockchain → phantom
+            if (blockchainAddresses.size > 0 && !blockchainAddresses.has(key)) {
+              phantomCount++;
+              console.warn(`[NODE] Phantom driver ${d.address.slice(0,8)} from node ${(node.operator as string).slice(0,8)}`);
+              continue; // exclude phantom driver from results
+            }
+            if (!allDrivers.has(key)) {
+              allDrivers.set(key, {
+                address:     d.address,
+                lat:         d.lat,
+                lng:         d.lng,
+                vehicle:     d.vehicle ?? "DeRide Car",
+                rating:      d.rating  ?? 4.8,
+                eta:         d.etaMinutes ?? 3,
+                distanceMi:  ((d.distanceKm ?? 1) * 0.621).toFixed(1),
+                fareUSD,
+                nodeAddress: node.operator,
+              });
+            }
+          }
+
+          if (phantomCount > 0) {
+            console.warn(`[NODE] Reporting node for ${phantomCount} phantom driver(s)`);
+            reportNodeFailure(node.operator);
+          }
+
+          // Also check for blockchain drivers the node is hiding
+          if (blockchainAddresses.size > 0) {
+            const nodeAddressSet = new Set(data.drivers.map((d: any) => (d.address as string).toLowerCase()));
+            let hiddenCount = 0;
+            for (const addr of blockchainAddresses) {
+              if (!nodeAddressSet.has(addr)) hiddenCount++;
+            }
+            if (hiddenCount > 0) {
+              console.warn(`[NODE] Node hiding ${hiddenCount} on-chain driver(s) — reporting`);
+              reportNodeFailure(node.operator);
+            }
+          }
+
+        } catch (e: any) {
+          console.warn(`[NODE] ${httpBase} unreachable:`, e.message);
+          reportNodeFailure(node.operator);
+        }
+      }
+
+      if (!anySucceeded || allDrivers.size === 0) return false;
+
+      const driverList = Array.from(allDrivers.values());
+      setDrivers(driverList);
+      setMultiplier(1.0);
+      setReason(`NodeRegistry · ${sortedNodes.length} node(s)`);
+      nodeAddressRef.current = sortedNodes[0]?.operator ?? "";
+
+      verifyNodeFare(combinedFareUSD, combinedDistKm, sortedNodes[0]?.operator ?? "");
+      return true;
+    } catch (e: any) {
+      console.warn("[NODE] Registry query failed:", e.message);
+      return false;
+    }
+  };
 
   const fetchFromContract = async (resolved: { lat: number; lng: number }) => {
     try {
@@ -227,53 +378,56 @@ export const HomeScreen = ({ navigation }: any) => {
     setDrivers([]);
     setSelected(null);
 
-    fetch("http://157.230.59.42:3000/riders/waiting", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ lat: riderLoc.lat, lng: riderLoc.lng }),
-    }).catch(() => {});
-
-    fetch("http://157.230.59.42:3000/riders/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        lat: riderLoc.lat, lng: riderLoc.lng,
-        destLat: resolved.lat, destLng: resolved.lng,
-      }),
-    })
-    .then(r => r.json())
-    .then(async data => {
-      setLoading(false);
-      if (data.drivers && data.drivers.length > 0) {
-        nodeAddressRef.current = data.nodeAddress ?? "";
-        const fareUSD = data.fare?.estimatedUSD ?? 3.25;
-        const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc.lat, riderLoc.lng, resolved.lat, resolved.lng);
-        setDrivers(data.drivers.map((d: any) => ({
-          address:    d.address,
-          lat:        d.lat,
-          lng:        d.lng,
-          vehicle:    d.vehicle ?? "DeRide Car",
-          rating:     d.rating ?? 4.8,
-          eta:        d.etaMinutes ?? 3,
-          distanceMi: ((d.distanceKm ?? 1) * 0.621).toFixed(1),
-          fareUSD,
-        })));
-        setMultiplier(data.fare?.multiplier ?? 1.0);
-        setReason(data.fare?.reason ?? "");
-        // Verify node's quoted fare against rider's independent calculation
-        verifyNodeFare(fareUSD, distKm, data.nodeAddress ?? "");
-      } else {
-        console.log("[SEARCH] Matching server returned no drivers — falling back to contract");
-        await fetchFromContract(resolved);
-      }
-    })
-    .catch(async () => {
-      console.log("[SEARCH] Matching server unreachable — falling back to contract");
-      setLoading(false);
-      await fetchFromContract(resolved);
-    });
-
     Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, tension: 65, friction: 10 }).start();
+
+    (async () => {
+      // 1. Try NodeRegistry (dynamic discovery)
+      const foundViaRegistry = await queryNodesFromRegistry(resolved);
+      if (foundViaRegistry) { setLoading(false); return; }
+
+      // 2. Fall back to hardcoded matching server
+      fetch("http://157.230.59.42:3000/riders/waiting", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lat: riderLoc.lat, lng: riderLoc.lng }),
+      }).catch(() => {});
+
+      fetch("http://157.230.59.42:3000/riders/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lat: riderLoc.lat, lng: riderLoc.lng, destLat: resolved.lat, destLng: resolved.lng }),
+      })
+      .then(r => r.json())
+      .then(async data => {
+        setLoading(false);
+        if (data.drivers && data.drivers.length > 0) {
+          nodeAddressRef.current = data.nodeAddress ?? "";
+          const fareUSD = data.fare?.estimatedUSD ?? 3.25;
+          const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc.lat, riderLoc.lng, resolved.lat, resolved.lng);
+          setDrivers(data.drivers.map((d: any) => ({
+            address:    d.address,
+            lat:        d.lat,
+            lng:        d.lng,
+            vehicle:    d.vehicle ?? "DeRide Car",
+            rating:     d.rating  ?? 4.8,
+            eta:        d.etaMinutes ?? 3,
+            distanceMi: ((d.distanceKm ?? 1) * 0.621).toFixed(1),
+            fareUSD,
+          })));
+          setMultiplier(data.fare?.multiplier ?? 1.0);
+          setReason(data.fare?.reason ?? "");
+          verifyNodeFare(fareUSD, distKm, data.nodeAddress ?? "");
+        } else {
+          console.log("[SEARCH] Matching server returned no drivers — falling back to contract");
+          await fetchFromContract(resolved);
+        }
+      })
+      .catch(async () => {
+        console.log("[SEARCH] Matching server unreachable — falling back to contract");
+        setLoading(false);
+        await fetchFromContract(resolved);
+      });
+    })();
   };
 
   const confirmRide = () => {
