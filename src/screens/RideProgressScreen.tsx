@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  Animated, Alert, ActivityIndicator,
+  Animated, Alert, ActivityIndicator, Share,
 } from "react-native";
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -21,8 +21,9 @@ const AVAIL_ABI     = ["function isOnline(address) external view returns (bool)"
 const ESCROW_ABI    = [
   "function createRide(bytes32,address,address,bytes32) external payable",
   "function confirmPickupByRider(bytes32) external",
-  "function confirmRide(bytes32) external",
-  "function disputeRide(bytes32) external",
+  "function confirmRide(bytes32,bytes32) external",
+  "function disputeRide(bytes32,bytes32) external",
+  "function escalateDispute(bytes32) external",
   "function getRideStatus(bytes32) external view returns (uint8)",
 ];
 
@@ -38,6 +39,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     | "pending_confirmation"// driver submitted proof
     | "completed"           // rider confirmed ride
     | "disputed"            // rider raised dispute
+    | "escalated"           // escalated to DAO after dispute
     | "failed";
 
   const [status, setStatus]       = useState<Status>("confirming");
@@ -50,11 +52,13 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   const [riderPos,  setRiderPos]  = useState({ lat: pickupLat, lng: pickupLng });
   const [elapsed, setElapsed]             = useState(0);
   const [actionLoading, setActionLoading] = useState(false);
+  const [disputedAt, setDisputedAt]   = useState<number | null>(null);
   const riderWalletRef       = useRef("");
   const privateKeyRef        = useRef("");
   const fadeAnim             = useRef(new Animated.Value(0)).current;
   const isBlockchainFallback = useRef(false);
   const webRTCAnswererRef    = useRef<WebRTCGPSAnswerer | null>(null);
+  const gpsLogRef            = useRef<Array<{ lat: number; lng: number; ts: number }>>([]);
   const [usingWebRTC, setUsingWebRTC] = useState(false);
 
   useEffect(() => {
@@ -80,6 +84,22 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     return () => clearInterval(timer);
   }, [status]);
 
+  // Record GPS every 10s during the ride
+  useEffect(() => {
+    if (status !== "driver_arriving" && status !== "pending_confirmation") return;
+    const interval = setInterval(async () => {
+      try {
+        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        gpsLogRef.current.push({
+          lat: loc.coords.latitude,
+          lng: loc.coords.longitude,
+          ts:  Math.floor(loc.timestamp / 1000),
+        });
+      } catch { /* skip if location unavailable */ }
+    }, 10_000);
+    return () => clearInterval(interval);
+  }, [status]);
+
   // Poll RideEscrow.getRideStatus() every 5s after escrow is created
   useEffect(() => {
     if (!rideId) return;
@@ -91,10 +111,11 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         const s = Number(await escrow.getRideStatus(rideId));
         console.log("[POLL] rideStatus:", s);
         if (!active) return;
-        if (s === 1) { console.log("[POLL] Updating UI to InProgress"); setStatus("driver_arriving"); } // InProgress — pickup confirmed
+        if (s === 1) { console.log("[POLL] Updating UI to InProgress"); setStatus("driver_arriving"); } // InProgress
         if (s === 2) setStatus("pending_confirmation"); // PendingConfirmation
-        if (s === 4) { clearInterval(poll); setStatus("completed"); }   // Completed
-        if (s === 5) { clearInterval(poll); setStatus("disputed"); }    // Disputed
+        if (s === 3) { clearInterval(poll); setStatus("disputed"); }    // Disputed
+        if (s === 4) { clearInterval(poll); setStatus("escalated"); }   // Escalated
+        if (s === 5) { clearInterval(poll); setStatus("completed"); }   // Completed
       } catch (e: any) {
         console.warn("[POLL] getRideStatus error:", e.message);
       }
@@ -311,20 +332,36 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     }
   };
 
+  const computeRouteHash = (): string => {
+    const log = gpsLogRef.current;
+    if (log.length === 0) return ethers.ZeroHash;
+    return ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(log)));
+  };
+
+  const saveGpsLog = async (currentRideId: string) => {
+    try {
+      await AsyncStorage.setItem(
+        `rider_gps_log_${currentRideId}`,
+        JSON.stringify(gpsLogRef.current),
+      );
+    } catch { /* non-critical */ }
+  };
+
   const handleConfirmRide = async () => {
     console.log("Confirm ride tapped");
     if (!rideId) return;
     setActionLoading(true);
     try {
-      console.log("Confirming ride...");
+      const routeHash = computeRouteHash();
+      await saveGpsLog(rideId);
+      console.log("Confirming ride, routeHash:", routeHash.slice(0, 18) + "...");
       const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
       const signer   = new ethers.Wallet(privateKeyRef.current, provider);
       const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
-      const tx = await escrow.confirmRide(rideId);
+      const tx = await escrow.confirmRide(rideId, routeHash);
       console.log("TX hash:", tx.hash);
       await tx.wait();
       setStatus("completed");
-      console.log("Status after confirm:", "completed");
     } catch (err: any) {
       Alert.alert("Error", err.message);
     } finally {
@@ -339,11 +376,14 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       { text: "Dispute", style: "destructive", onPress: async () => {
         setActionLoading(true);
         try {
+          const routeHash = computeRouteHash();
+          await saveGpsLog(rideId!);
           const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
           const signer   = new ethers.Wallet(privateKeyRef.current, provider);
           const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
-          const tx = await escrow.disputeRide(rideId);
+          const tx = await escrow.disputeRide(rideId, routeHash);
           await tx.wait();
+          setDisputedAt(Date.now());
           setStatus("disputed");
         } catch (err: any) {
           Alert.alert("Error", err.message);
@@ -353,6 +393,43 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       }},
     ]);
   };
+
+  const handleEscalate = async () => {
+    if (!rideId) return;
+    Alert.alert("Escalate to DAO", "This will escalate the dispute to the DeRide DAO for review.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Escalate", style: "destructive", onPress: async () => {
+        setActionLoading(true);
+        try {
+          const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+          const signer   = new ethers.Wallet(privateKeyRef.current, provider);
+          const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
+          const tx = await escrow.escalateDispute(rideId);
+          await tx.wait();
+          setStatus("escalated");
+        } catch (err: any) {
+          Alert.alert("Error", err.message);
+        } finally {
+          setActionLoading(false);
+        }
+      }},
+    ]);
+  };
+
+  const handleExportLog = async () => {
+    const log = gpsLogRef.current;
+    if (log.length === 0) {
+      Alert.alert("No GPS Data", "No route data was recorded for this ride.");
+      return;
+    }
+    await Share.share({
+      title:   `DeRide GPS Log — Ride ${rideId?.slice(0, 10) ?? ""}`,
+      message: JSON.stringify({ rideId, log }, null, 2),
+    });
+  };
+
+  const escalationWindowOpen =
+    disputedAt !== null && Date.now() - disputedAt < 48 * 3600 * 1000;
 
   const fallbackViaRelay = async (driverAddr: string) => {
     try {
@@ -426,10 +503,11 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     confirming:           { emoji: "⏳", title: "Finding driver...",             sub: "Connecting to server" },
     creating_escrow:      { emoji: "🔗", title: "Creating escrow...",            sub: "Locking fare on Polygon" },
     waiting_pickup:       { emoji: "📍", title: "Driver is on the way",          sub: "Show PIN to driver at pickup" },
-    driver_arriving:      { emoji: "🚗", title: "Ride in Progress",                        sub: driver.vehicle },
+    driver_arriving:      { emoji: "🚗", title: "Ride in Progress",              sub: driver.vehicle },
     pending_confirmation: { emoji: "✋", title: "Confirm your ride",             sub: "Driver has completed the route" },
     completed:            { emoji: "✅", title: "You've arrived!",               sub: "Payment released" },
-    disputed:             { emoji: "⚠️", title: "Dispute raised",               sub: "DeRide Foundation will review" },
+    disputed:             { emoji: "⚠️", title: "Dispute raised",               sub: "Awaiting verifier review" },
+    escalated:            { emoji: "🏛", title: "Escalated to DAO",              sub: "DeRide DAO is reviewing" },
     failed:               { emoji: "❌", title: "Something went wrong",          sub: "Please try again" },
   }[status];
 
@@ -565,11 +643,54 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         )}
 
         {status === "disputed" && (
-          <View style={[styles.successCard, { backgroundColor: "#1a0000", borderColor: "#FF4444" }]}>
-            <Text style={[{ color: "#FF4444", fontSize: 16, fontWeight: "700" }]}>Dispute Submitted</Text>
-            <Text style={[{ color: colors.textSub, fontSize: 13, marginTop: 6, textAlign: "center" }]}>
-              DeRide Foundation will review and resolve within 24 hours.
-            </Text>
+          <View style={{ gap: 10 }}>
+            <View style={[styles.successCard, { backgroundColor: "#1a0000", borderColor: "#FF4444" }]}>
+              <Text style={[{ color: "#FF4444", fontSize: 16, fontWeight: "700" }]}>Dispute Submitted</Text>
+              <Text style={[{ color: colors.textSub, fontSize: 13, marginTop: 6, textAlign: "center" }]}>
+                Your verifier will review and resolve.
+              </Text>
+            </View>
+            {escalationWindowOpen && (
+              <TouchableOpacity
+                style={[styles.disputeBtn, { borderColor: "#FF8800" }, actionLoading && { opacity: 0.7 }]}
+                onPress={handleEscalate}
+                disabled={actionLoading}
+              >
+                {actionLoading
+                  ? <ActivityIndicator color="#FF8800" />
+                  : <Text style={{ color: "#FF8800", fontSize: 14, fontWeight: "600" }}>
+                      Escalate to DAO 🏛
+                    </Text>
+                }
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              style={[styles.disputeBtn, { borderColor: colors.border }]}
+              onPress={handleExportLog}
+            >
+              <Text style={{ color: colors.textSub, fontSize: 14, fontWeight: "600" }}>
+                Export Ride Log
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {status === "escalated" && (
+          <View style={{ gap: 10 }}>
+            <View style={[styles.successCard, { backgroundColor: "#1a0a00", borderColor: "#FF8800" }]}>
+              <Text style={[{ color: "#FF8800", fontSize: 16, fontWeight: "700" }]}>Escalated to DAO</Text>
+              <Text style={[{ color: colors.textSub, fontSize: 13, marginTop: 6, textAlign: "center" }]}>
+                The DeRide DAO will resolve this dispute.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.disputeBtn, { borderColor: colors.border }]}
+              onPress={handleExportLog}
+            >
+              <Text style={{ color: colors.textSub, fontSize: 14, fontWeight: "600" }}>
+                Export Ride Log
+              </Text>
+            </TouchableOpacity>
           </View>
         )}
 
