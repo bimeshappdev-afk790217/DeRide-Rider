@@ -34,14 +34,26 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      ["expo-location", {
-        "locationWhenInUsePermission": "DeRide needs your location to find nearby riders"
-      }],
-      ["expo-notifications", {
-        "icon": "./assets/icon.png",
-        "color": "#00E5A0",
-        "sounds": []
-      }]
-    ]
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "DeRide needs your location to find nearby riders"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#00E5A0",
+          "sounds": []
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "e77e0656-302e-4e0d-bf9b-940ca2caf5af"
+      }
+    },
+    "owner": "bimeshappdev"
   }
 }
