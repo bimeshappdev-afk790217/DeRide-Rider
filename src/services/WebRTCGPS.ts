@@ -46,6 +46,10 @@ export class WebRTCGPSAnswerer {
       console.warn("[WEBRTC] ALCHEMY_URL or MESSAGE_RELAY not configured");
       return;
     }
+    if (typeof RTCPeerConnection === 'undefined' || RTCPeerConnection === null) {
+      console.warn("[WEBRTC] WebRTC not available in Expo Go — skipping GPS relay");
+      return;
+    }
     console.log("[WEBRTC] Answerer waiting for driver offer (rideId:", rideId.slice(0, 10), ")");
 
     const provider   = new ethers.JsonRpcProvider(ALCHEMY_URL);
@@ -67,7 +71,18 @@ export class WebRTCGPSAnswerer {
         this.pollInterval = null;
         console.log("[WEBRTC] Got offer from driver:", (from as string).slice(0, 8));
 
-        const pc = new RTCPeerConnection(RTC_CONFIG);
+        let pc: RTCPeerConnection;
+        try {
+          pc = new RTCPeerConnection(RTC_CONFIG);
+        } catch (e: any) {
+          const msg: string = e.message ?? "";
+          if (msg.includes("native module") || msg.includes("Expo Go") || msg.includes("RTCPeerConnection")) {
+            console.warn("[WEBRTC] WebRTC not available in Expo Go — skipping GPS relay");
+          } else {
+            console.warn("[WEBRTC] RTCPeerConnection failed:", msg);
+          }
+          return;
+        }
         this.pc  = pc;
 
         (pc as any).ondatachannel = (event: any) => {
