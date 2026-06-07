@@ -1,11 +1,12 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ScrollView, Animated, TextInput, StatusBar, Alert,
+  ScrollView, Animated, TextInput, StatusBar, Alert, FlatList,
 } from "react-native";
+import * as Updates from "expo-updates";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { ethers } from "ethers";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Typography, Spacing, Radius, Shadow } from "../theme";
@@ -44,21 +45,7 @@ function encodeGeohash(lat: number, lng: number, precision = 4): string {
   return hash;
 }
 
-const MOCK_RECENT = [
-  { id: "1", name: "Dayton Mall",          address: "2700 Miamisburg Centerville Rd" },
-  { id: "2", name: "University of Dayton", address: "300 College Park, Dayton" },
-  { id: "3", name: "Dayton Airport",       address: "3600 Terminal Dr, Vandalia" },
-  { id: "4", name: "Oregon District",      address: "E 5th St, Dayton, OH" },
-];
-
-const DEST_COORDS: Record<string, { lat: number; lng: number }> = {
-  "Dayton Mall":          { lat: 39.7239, lng: -84.2186 },
-  "University of Dayton": { lat: 39.7400, lng: -84.1824 },
-  "Dayton Airport":       { lat: 39.9020, lng: -84.2193 },
-  "Oregon District":      { lat: 39.7577, lng: -84.1916 },
-};
-
-const DEFAULT_DEST = { lat: 39.7480, lng: -84.2020 };
+const NEARBY_CATEGORIES = ["Airport", "Hospital", "Mall", "Restaurant"];
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R    = 6371;
@@ -72,23 +59,6 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-const RecentPlace = ({ place, onPress }: any) => {
-  const { colors } = useTheme();
-  return (
-    <TouchableOpacity
-      style={[styles.recentItem, { borderBottomColor: colors.border }]}
-      onPress={() => onPress(place)}
-    >
-      <View style={[styles.placeIcon, { backgroundColor: colors.surfaceAlt }]}>
-        <Text style={{ fontSize: 16 }}>📍</Text>
-      </View>
-      <View style={styles.placeInfo}>
-        <Text style={[styles.placeName, { color: colors.text }]}>{place.name}</Text>
-        <Text style={[styles.placeAddress, { color: colors.textSub }]}>{place.address}</Text>
-      </View>
-    </TouchableOpacity>
-  );
-};
 
 const DriverCard = ({ driver, onSelect, selected }: any) => {
   const { colors } = useTheme();
@@ -122,16 +92,20 @@ const DriverCard = ({ driver, onSelect, selected }: any) => {
 
 export const HomeScreen = ({ navigation }: any) => {
   const { colors, isDark } = useTheme();
-  const [destination, setDestination] = useState("");
-  const [destCoords, setDestCoords]   = useState<{ lat: number; lng: number } | null>(null);
-  const [searching, setSearching]     = useState(false);
-  const [loading, setLoading]         = useState(false);
-  const [drivers, setDrivers]         = useState<any[]>([]);
-  const [selected, setSelected]       = useState<any>(null);
-  const [multiplier, setMultiplier]   = useState(0.9);
-  const [reason, setReason]           = useState("3 drivers nearby — good availability");
-  const [riderLoc, setRiderLoc]       = useState({ lat: 39.7610, lng: -84.1890 });
+  const [destination, setDestination]     = useState("");
+  const [destCoords, setDestCoords]       = useState<{ lat: number; lng: number } | null>(null);
+  const [searching, setSearching]         = useState(false);
+  const [loading, setLoading]             = useState(false);
+  const [drivers, setDrivers]             = useState<any[]>([]);
+  const [selected, setSelected]           = useState<any>(null);
+  const [multiplier, setMultiplier]       = useState(0.9);
+  const [reason, setReason]               = useState("3 drivers nearby — good availability");
+  const [riderLoc, setRiderLoc]           = useState<{ lat: number; lng: number } | null>(null);
+  const [locationError, setLocationError] = useState(false);
+  const [suggestions, setSuggestions]     = useState<any[]>([]);
+  const [walletAddress, setWalletAddress] = useState("");
   const nodeAddressRef = useRef<string>("");
+  const debounceRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mapRef    = useRef<MapView>(null);
   const slideAnim = useRef(new Animated.Value(300)).current;
   const fadeAnim  = useRef(new Animated.Value(0)).current;
@@ -170,16 +144,57 @@ export const HomeScreen = ({ navigation }: any) => {
 
   useEffect(() => {
     Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+    AsyncStorage.getItem("rider_wallet_address").then(addr => {
+      if (addr) setWalletAddress(addr);
+    }).catch(() => {});
     (async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status === 'granted') {
           const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
           setRiderLoc({ lat: loc.coords.latitude, lng: loc.coords.longitude });
+          setLocationError(false);
+        } else {
+          setLocationError(true);
         }
-      } catch { /* keep fallback */ }
+      } catch {
+        setLocationError(true);
+      }
     })();
   }, []);
+
+  const searchPlaces = useCallback(async (input: string) => {
+    if (!riderLoc) return;
+    if (input.length < 3) { setSuggestions([]); return; }
+    try {
+      const resp = await fetch(
+        `https://nominatim.openstreetmap.org/search?` +
+        `q=${encodeURIComponent(input)}&format=json&limit=5` +
+        `&lat=${riderLoc!.lat}&lon=${riderLoc!.lng}&addressdetails=1`,
+        { headers: { "User-Agent": "DeRide/1.0" } }
+      );
+      const results: any[] = await resp.json();
+      setSuggestions(results);
+    } catch {
+      setSuggestions([]);
+    }
+  }, [riderLoc]);
+
+  const searchNearbyCategory = useCallback(async (category: string) => {
+    if (!riderLoc) return;
+    try {
+      const resp = await fetch(
+        `https://nominatim.openstreetmap.org/search?` +
+        `q=${encodeURIComponent(category)}&format=json&limit=5` +
+        `&lat=${riderLoc!.lat}&lon=${riderLoc!.lng}&addressdetails=1`,
+        { headers: { "User-Agent": "DeRide/1.0" } }
+      );
+      const results: any[] = await resp.json();
+      setSuggestions(results);
+    } catch {
+      setSuggestions([]);
+    }
+  }, [riderLoc]);
 
   // Fit map to show both pickup and destination after search starts
   useEffect(() => {
@@ -187,7 +202,7 @@ export const HomeScreen = ({ navigation }: any) => {
     const t = setTimeout(() => {
       mapRef.current?.fitToCoordinates(
         [
-          { latitude: riderLoc.lat,   longitude: riderLoc.lng },
+          { latitude: riderLoc!.lat,   longitude: riderLoc!.lng },
           { latitude: destCoords.lat, longitude: destCoords.lng },
         ],
         { edgePadding: { top: 80, right: 60, bottom: 240, left: 60 }, animated: true }
@@ -197,11 +212,11 @@ export const HomeScreen = ({ navigation }: any) => {
   }, [destCoords, searching]);
 
   const queryNodesFromRegistry = async (resolved: { lat: number; lng: number }): Promise<boolean> => {
-    if (!ALCHEMY_URL) return false;
+    if (!ALCHEMY_URL || !riderLoc) return false;
     try {
       const provider = new ethers.JsonRpcProvider(ALCHEMY_URL);
       const registry = new ethers.Contract(NODE_REG_ADDR, NODE_REG_ABI, provider);
-      const geohash  = encodeGeohash(riderLoc.lat, riderLoc.lng);
+      const geohash  = encodeGeohash(riderLoc!.lat, riderLoc!.lng);
       console.log("[NODE] Querying NodeRegistry for geohash:", geohash);
 
       const rawNodes = await Promise.race([
@@ -244,7 +259,7 @@ export const HomeScreen = ({ navigation }: any) => {
           const resp = await fetch(`${httpBase}/riders/search`, {
             method:  "POST",
             headers: { "Content-Type": "application/json" },
-            body:    JSON.stringify({ lat: riderLoc.lat, lng: riderLoc.lng, destLat: resolved.lat, destLng: resolved.lng }),
+            body:    JSON.stringify({ lat: riderLoc!.lat, lng: riderLoc!.lng, destLat: resolved.lat, destLng: resolved.lng }),
             signal:  ctrl.signal,
           });
           clearTimeout(timer);
@@ -254,7 +269,7 @@ export const HomeScreen = ({ navigation }: any) => {
 
           anySucceeded = true;
           const fareUSD = data.fare?.estimatedUSD ?? 3.25;
-          const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc.lat, riderLoc.lng, resolved.lat, resolved.lng);
+          const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc!.lat, riderLoc!.lng, resolved.lat, resolved.lng);
           if (!combinedFareUSD) { combinedFareUSD = fareUSD; combinedDistKm = distKm; }
 
           let phantomCount = 0;
@@ -308,6 +323,12 @@ export const HomeScreen = ({ navigation }: any) => {
       if (!anySucceeded || allDrivers.size === 0) return false;
 
       const driverList = Array.from(allDrivers.values());
+      if (process.env.EXPO_PUBLIC_DEBUG === "true") {
+        console.log("[SEARCH] Drivers found:", driverList.length);
+        console.log("[SEARCH] Driver locations:", driverList.map(d => ({
+          wallet: d.address?.slice(0, 8), lat: d.lat, lng: d.lng, distanceMi: d.distanceMi,
+        })));
+      }
       setDrivers(driverList);
       setMultiplier(1.0);
       setReason(`NodeRegistry · ${sortedNodes.length} node(s)`);
@@ -342,7 +363,7 @@ export const HomeScreen = ({ navigation }: any) => {
             } catch { /* if call fails, include driver */ }
             const dLat       = Number(d.lat) / 1e6;
             const dLng       = Number(d.lng) / 1e6;
-            const distanceKm = haversineKm(riderLoc.lat, riderLoc.lng, dLat, dLng);
+            const distanceKm = haversineKm(riderLoc!.lat, riderLoc!.lng, dLat, dLng);
             return {
               address:    d.wallet,
               lat:        dLat,
@@ -357,6 +378,12 @@ export const HomeScreen = ({ navigation }: any) => {
         )
       ).filter(d => d !== null);
       console.log(`[CONTRACT] ${mapped.length} driver(s) available (not on a ride)`);
+      if (process.env.EXPO_PUBLIC_DEBUG === "true") {
+        console.log("[SEARCH] Drivers found:", mapped.length);
+        console.log("[SEARCH] Driver locations:", mapped.map(d => ({
+          wallet: d.address?.slice(0, 8), lat: d.lat, lng: d.lng, distanceMi: d.distanceMi,
+        })));
+      }
       setDrivers(mapped);
       setReason("On-chain driver availability");
     } catch (e: any) {
@@ -365,10 +392,23 @@ export const HomeScreen = ({ navigation }: any) => {
     }
   };
 
-  const searchDrivers = (dest: string) => {
-    const resolved = DEST_COORDS[dest] ?? DEFAULT_DEST;
+  const searchDrivers = (dest: string, coords?: { lat: number; lng: number }) => {
+    if (!riderLoc) {
+      Alert.alert("Location required", "Please enable location to find drivers.");
+      return;
+    }
+    const resolved = coords ?? destCoords;
+    if (!resolved) {
+      Alert.alert("Select a destination", "Please choose a destination first.");
+      return;
+    }
+    if (process.env.EXPO_PUBLIC_DEBUG === "true") {
+      console.log("[SEARCH] Searching near:", riderLoc!.lat, riderLoc!.lng);
+      console.log("[SEARCH] Destination:", resolved.lat, resolved.lng);
+    }
     setDestination(dest);
     setDestCoords(resolved);
+    setSuggestions([]);
     setSearching(true);
     setLoading(true);
     setDrivers([]);
@@ -385,13 +425,13 @@ export const HomeScreen = ({ navigation }: any) => {
       fetch("http://157.230.59.42:3000/riders/waiting", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lat: riderLoc.lat, lng: riderLoc.lng }),
+        body: JSON.stringify({ lat: riderLoc!.lat, lng: riderLoc!.lng }),
       }).catch(() => {});
 
       fetch("http://157.230.59.42:3000/riders/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lat: riderLoc.lat, lng: riderLoc.lng, destLat: resolved.lat, destLng: resolved.lng }),
+        body: JSON.stringify({ lat: riderLoc!.lat, lng: riderLoc!.lng, destLat: resolved.lat, destLng: resolved.lng }),
       })
       .then(r => r.json())
       .then(async data => {
@@ -399,7 +439,7 @@ export const HomeScreen = ({ navigation }: any) => {
         if (data.drivers && data.drivers.length > 0) {
           nodeAddressRef.current = data.nodeAddress ?? "";
           const fareUSD = data.fare?.estimatedUSD ?? 3.25;
-          const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc.lat, riderLoc.lng, resolved.lat, resolved.lng);
+          const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc!.lat, riderLoc!.lng, resolved.lat, resolved.lng);
           setDrivers(data.drivers.map((d: any) => ({
             address:    d.address,
             lat:        d.lat,
@@ -427,16 +467,16 @@ export const HomeScreen = ({ navigation }: any) => {
   };
 
   const confirmRide = () => {
-    if (!selected || !destCoords) return;
+    if (!selected || !destCoords || !riderLoc) return;
     navigation.navigate("RideProgress", {
       driver: selected, destination,
-      pickupLat: riderLoc.lat,    pickupLng: riderLoc.lng,
+      pickupLat: riderLoc!.lat,    pickupLng: riderLoc!.lng,
       destLat:   destCoords.lat,  destLng:   destCoords.lng,
     });
   };
 
-  const routeInfo = destCoords ? (() => {
-    const km   = haversineKm(riderLoc.lat, riderLoc.lng, destCoords.lat, destCoords.lng);
+  const routeInfo = destCoords && riderLoc ? (() => {
+    const km   = haversineKm(riderLoc!.lat, riderLoc!.lng, destCoords.lat, destCoords.lng);
     const mi   = (km * 0.621).toFixed(1);
     const mins = Math.ceil(km / 0.5);
     return `${mi} miles · ~${mins} min`;
@@ -449,7 +489,9 @@ export const HomeScreen = ({ navigation }: any) => {
       <View style={[styles.header, { borderBottomColor: colors.border }]}>
         <View>
           <Text style={[styles.greeting, { color: colors.textSub }]}>Where to?</Text>
-          <Text style={[styles.title, { color: colors.text }]}>Dayton, OH</Text>
+          <Text style={[styles.title, { color: colors.text }]}>
+            {riderLoc ? `${riderLoc!.lat.toFixed(3)}°, ${riderLoc!.lng.toFixed(3)}°` : "Finding your location..."}
+          </Text>
         </View>
         <TouchableOpacity
           style={[styles.profileBtn, { backgroundColor: colors.surface, borderColor: colors.border }]}
@@ -462,7 +504,9 @@ export const HomeScreen = ({ navigation }: any) => {
       <View style={[styles.searchBox, { backgroundColor: colors.surface, borderColor: colors.border }]}>
         <View style={styles.searchRow}>
           <View style={[styles.dot, { backgroundColor: Colors.brand }]} />
-          <Text style={[styles.searchLabel, { color: colors.textMuted }]}>Current location · Dayton, OH</Text>
+          <Text style={[styles.searchLabel, { color: colors.textMuted }]}>
+            {locationError ? "⚠ Location disabled" : "Current location"}
+          </Text>
         </View>
         <View style={[styles.searchDivider, { backgroundColor: colors.border }]} />
         <View style={styles.searchRow}>
@@ -472,21 +516,76 @@ export const HomeScreen = ({ navigation }: any) => {
             placeholder="Enter destination"
             placeholderTextColor={colors.textMuted}
             value={destination}
-            onChangeText={setDestination}
-            onSubmitEditing={() => searchDrivers(destination)}
+            onChangeText={text => {
+              setDestination(text);
+              if (debounceRef.current) clearTimeout(debounceRef.current);
+              debounceRef.current = setTimeout(() => searchPlaces(text), 500);
+              if (text.length === 0) setSuggestions([]);
+            }}
+            onSubmitEditing={() => {
+              if (suggestions.length > 0) {
+                const s = suggestions[0];
+                searchDrivers(s.display_name, { lat: parseFloat(s.lat), lng: parseFloat(s.lon) });
+              } else {
+                searchDrivers(destination);
+              }
+            }}
             returnKeyType="search"
           />
         </View>
+
+        {/* Autocomplete dropdown */}
+        {suggestions.length > 0 && (
+          <FlatList
+            data={suggestions}
+            keyExtractor={(_, i) => String(i)}
+            style={[styles.suggestList, { backgroundColor: colors.surface, borderColor: colors.border }]}
+            keyboardShouldPersistTaps="handled"
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={[styles.suggestItem, { borderBottomColor: colors.border }]}
+                onPress={() => searchDrivers(item.display_name, { lat: parseFloat(item.lat), lng: parseFloat(item.lon) })}
+              >
+                <Text style={[styles.suggestName, { color: colors.text }]} numberOfLines={1}>
+                  {item.name || item.display_name.split(",")[0]}
+                </Text>
+                <Text style={[styles.suggestAddr, { color: colors.textSub }]} numberOfLines={1}>
+                  {item.display_name}
+                </Text>
+              </TouchableOpacity>
+            )}
+          />
+        )}
       </View>
 
       {!searching ? (
         <ScrollView contentContainerStyle={{ padding: 24 }}>
-          <Text style={[styles.sectionTitle, { color: colors.text }]}>Recent Places</Text>
-          <View style={[styles.recentList, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-            {MOCK_RECENT.map(place => (
-              <RecentPlace key={place.id} place={place} onPress={(p: any) => searchDrivers(p.name)} />
-            ))}
-          </View>
+          {locationError ? (
+            <View style={[styles.locationErrBox, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+              <Text style={{ fontSize: 24, marginBottom: 8 }}>📍</Text>
+              <Text style={[{ color: colors.text, fontSize: 15, fontWeight: "600", marginBottom: 6 }]}>
+                Please enable location to find drivers
+              </Text>
+              <Text style={[{ color: colors.textSub, fontSize: 13, textAlign: "center" }]}>
+                DeRide needs your location to show nearby drivers and calculate fares.
+              </Text>
+            </View>
+          ) : (
+            <>
+              <Text style={[styles.sectionTitle, { color: colors.text }]}>Nearby Places</Text>
+              <View style={styles.categoryRow}>
+                {NEARBY_CATEGORIES.map(cat => (
+                  <TouchableOpacity
+                    key={cat}
+                    style={[styles.categoryChip, { backgroundColor: colors.surface, borderColor: colors.border }]}
+                    onPress={() => searchNearbyCategory(cat)}
+                  >
+                    <Text style={[styles.categoryText, { color: colors.text }]}>{cat}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </>
+          )}
         </ScrollView>
       ) : (
         <View style={{ flex: 1 }}>
@@ -495,18 +594,20 @@ export const HomeScreen = ({ navigation }: any) => {
               ref={mapRef}
               style={StyleSheet.absoluteFillObject}
               region={{
-                latitude:       riderLoc.lat,
-                longitude:      riderLoc.lng,
+                latitude:       riderLoc?.lat  ?? 0,
+                longitude:      riderLoc?.lng  ?? 0,
                 latitudeDelta:  0.05,
                 longitudeDelta: 0.05,
               }}
             >
               {/* Blue pin — rider pickup */}
+              {riderLoc && (
               <Marker
-                coordinate={{ latitude: riderLoc.lat, longitude: riderLoc.lng }}
+                coordinate={{ latitude: riderLoc!.lat, longitude: riderLoc!.lng }}
                 title="Pickup"
                 pinColor="#007AFF"
               />
+              )}
 
               {/* Red pin — destination */}
               {destCoords && (
@@ -518,10 +619,10 @@ export const HomeScreen = ({ navigation }: any) => {
               )}
 
               {/* Dashed route line */}
-              {destCoords && (
+              {riderLoc && destCoords && (
                 <Polyline
                   coordinates={[
-                    { latitude: riderLoc.lat,   longitude: riderLoc.lng },
+                    { latitude: riderLoc!.lat,   longitude: riderLoc!.lng },
                     { latitude: destCoords.lat, longitude: destCoords.lng },
                   ]}
                   strokeColor="#007AFF"
@@ -598,6 +699,27 @@ export const HomeScreen = ({ navigation }: any) => {
           </Animated.View>
         </View>
       )}
+
+      {process.env.EXPO_PUBLIC_DEBUG === "true" && (
+        <View style={[styles.debugPanel, { backgroundColor: colors.surfaceAlt, borderColor: colors.border }]}>
+          <Text style={[styles.debugTitle, { color: colors.textSub }]}>🔧 Debug Panel</Text>
+          <TouchableOpacity onPress={async () => { await AsyncStorage.clear(); await Updates.reloadAsync(); }}>
+            <Text style={[styles.debugAction, { color: "#FF4444" }]}>🗑 Reset App</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => Updates.reloadAsync()}>
+            <Text style={[styles.debugAction, { color: Colors.brand }]}>🔄 Reload App</Text>
+          </TouchableOpacity>
+          <Text style={[styles.debugInfo, { color: colors.textMuted }]}>
+            Wallet: {walletAddress ? walletAddress.slice(0, 12) + "..." : "not set"}
+          </Text>
+          <Text style={[styles.debugInfo, { color: colors.textMuted }]}>
+            Server: {process.env.EXPO_PUBLIC_MATCHING_SERVER_URL ?? "unset"}
+          </Text>
+          <Text style={[styles.debugInfo, { color: colors.textMuted }]}>
+            Escrow: {(process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS ?? "unset").slice(0, 12)}...
+          </Text>
+        </View>
+      )}
     </Animated.View>
   );
 };
@@ -644,6 +766,18 @@ const styles = StyleSheet.create({
   driverRight:    { alignItems: "flex-end" },
   driverFare:     { fontSize: 18, fontWeight: "700" },
   driverEta:      { fontSize: 12, marginTop: 2 },
-  confirmBtn:     { backgroundColor: "#00E5A0", padding: 20, borderRadius: 16, alignItems: "center", marginTop: 8 },
-  confirmBtnText: { color: "#000", fontSize: 16, fontWeight: "700" },
+  confirmBtn:      { backgroundColor: "#00E5A0", padding: 20, borderRadius: 16, alignItems: "center", marginTop: 8 },
+  confirmBtnText:  { color: "#000", fontSize: 16, fontWeight: "700" },
+  suggestList:     { maxHeight: 220, borderRadius: 12, borderWidth: 1, marginTop: 4, overflow: "hidden" },
+  suggestItem:     { paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1 },
+  suggestName:     { fontSize: 14, fontWeight: "600" },
+  suggestAddr:     { fontSize: 11, marginTop: 2 },
+  categoryRow:     { flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 16 },
+  categoryChip:    { paddingVertical: 10, paddingHorizontal: 18, borderRadius: 20, borderWidth: 1 },
+  categoryText:    { fontSize: 13, fontWeight: "600" },
+  locationErrBox:  { borderRadius: 16, borderWidth: 1, padding: 24, alignItems: "center", marginBottom: 16 },
+  debugPanel:      { padding: 12, borderTopWidth: 1 },
+  debugTitle:      { fontSize: 11, fontWeight: "700", marginBottom: 6 },
+  debugAction:     { fontSize: 12, fontWeight: "600", marginBottom: 4 },
+  debugInfo:       { fontSize: 10, marginTop: 2 },
 });
