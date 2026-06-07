@@ -40,7 +40,13 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
 
 export const RideProgressScreen = ({ route, navigation }: any) => {
   const { colors } = useTheme();
-  const { driver, destination, pickupLat, pickupLng, destLat, destLng } = route.params;
+  const _p = route.params;
+  const driver      = _p.driver;
+  const destination = _p.destination;
+  const pickupLat   = parseFloat(_p.pickupLat);
+  const pickupLng   = parseFloat(_p.pickupLng);
+  const destLat     = parseFloat(_p.destLat);
+  const destLng     = parseFloat(_p.destLng);
 
   type Status =
     | "confirming"          // calling /riders/confirm HTTP

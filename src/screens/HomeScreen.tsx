@@ -284,8 +284,8 @@ export const HomeScreen = ({ navigation }: any) => {
             if (!allDrivers.has(key)) {
               allDrivers.set(key, {
                 address:     d.address,
-                lat:         d.lat,
-                lng:         d.lng,
+                lat:         parseFloat(d.lat),
+                lng:         parseFloat(d.lng),
                 vehicle:     d.vehicle ?? "DeRide Car",
                 rating:      d.rating  ?? 4.8,
                 eta:         d.etaMinutes ?? 3,
@@ -442,8 +442,8 @@ export const HomeScreen = ({ navigation }: any) => {
           const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc!.lat, riderLoc!.lng, resolved.lat, resolved.lng);
           setDrivers(data.drivers.map((d: any) => ({
             address:    d.address,
-            lat:        d.lat,
-            lng:        d.lng,
+            lat:        parseFloat(d.lat),
+            lng:        parseFloat(d.lng),
             vehicle:    d.vehicle ?? "DeRide Car",
             rating:     d.rating  ?? 4.8,
             eta:        d.etaMinutes ?? 3,
@@ -468,11 +468,30 @@ export const HomeScreen = ({ navigation }: any) => {
 
   const confirmRide = () => {
     if (!selected || !destCoords || !riderLoc) return;
-    navigation.navigate("RideProgress", {
-      driver: selected, destination,
-      pickupLat: riderLoc!.lat,    pickupLng: riderLoc!.lng,
-      destLat:   destCoords.lat,  destLng:   destCoords.lng,
-    });
+
+    const pickupLat = parseFloat(riderLoc!.lat.toString());
+    const pickupLng = parseFloat(riderLoc!.lng.toString());
+    const destLat   = parseFloat(destCoords.lat.toString());
+    const destLng   = parseFloat(destCoords.lng.toString());
+
+    if (!destLat || !destLng) {
+      Alert.alert("Please select a destination");
+      return;
+    }
+    if (isNaN(pickupLat) || isNaN(pickupLng) || isNaN(destLat) || isNaN(destLng)) {
+      Alert.alert("Invalid coordinates", "Could not determine your location or destination. Please try again.");
+      return;
+    }
+
+    try {
+      navigation.navigate("RideProgress", {
+        driver: selected, destination,
+        pickupLat, pickupLng, destLat, destLng,
+      });
+    } catch (error: any) {
+      console.error("Ride creation error:", error);
+      Alert.alert("Error", error.message ?? "Could not start ride. Please try again.");
+    }
   };
 
   const routeInfo = destCoords && riderLoc ? (() => {
