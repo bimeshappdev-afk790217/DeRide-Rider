@@ -19,13 +19,24 @@ const MATCHING_HTTP = "http://157.230.59.42:3000";
 const MATCHING_WS   = "ws://157.230.59.42:3000";
 const AVAIL_ABI     = ["function isOnline(address) external view returns (bool)"];
 const ESCROW_ABI    = [
-  "function createRide(bytes32,address,address,bytes32) external payable",
+  "function createRide(bytes32,address,address,bytes32,uint256) external payable",
   "function confirmPickupByRider(bytes32) external",
   "function confirmRide(bytes32,bytes32) external",
   "function disputeRide(bytes32,bytes32) external",
   "function escalateDispute(bytes32) external",
+  "function cancelRide(bytes32) external",
   "function getRideStatus(bytes32) external view returns (uint8)",
 ];
+
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180)
+    * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 export const RideProgressScreen = ({ route, navigation }: any) => {
   const { colors } = useTheme();
@@ -42,14 +53,16 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     | "escalated"           // escalated to DAO after dispute
     | "failed";
 
-  const [status, setStatus]       = useState<Status>("confirming");
-  const [rideId, setRideId]       = useState<string | null>(null);
-  const [pin, setPin]             = useState<number | null>(null);
-  const [txHash, setTxHash]       = useState<string | null>(null);
-  const [fareUSD, setFareUSD]     = useState(driver.fareUSD ?? 0);
-  const [eta, setEta]             = useState(driver.eta ?? 5);
-  const [driverLoc, setDriverLoc] = useState({ lat: pickupLat + 0.005, lng: pickupLng + 0.005 });
-  const [riderPos,  setRiderPos]  = useState({ lat: pickupLat, lng: pickupLng });
+  const [status, setStatus]           = useState<Status>("confirming");
+  const [rideId, setRideId]           = useState<string | null>(null);
+  const [pin, setPin]                 = useState<number | null>(null);
+  const [txHash, setTxHash]           = useState<string | null>(null);
+  const [fareUSD, setFareUSD]         = useState(driver.fareUSD ?? 0);
+  const [eta, setEta]                 = useState(driver.eta ?? 5);
+  const [etaMinutes, setEtaMinutes]   = useState<number | null>(driver.eta ?? null);
+  const originalEtaMins               = useRef<number>(driver.eta ?? 5);
+  const [driverLoc, setDriverLoc]     = useState({ lat: pickupLat + 0.005, lng: pickupLng + 0.005 });
+  const [riderPos,  setRiderPos]      = useState({ lat: pickupLat, lng: pickupLng });
   const [elapsed, setElapsed]             = useState(0);
   const [actionLoading, setActionLoading] = useState(false);
   const [disputedAt, setDisputedAt]   = useState<number | null>(null);
@@ -136,7 +149,10 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       const answerer = new WebRTCGPSAnswerer();
       answerer.onGPSUpdate = (lat, lng) => {
         setDriverLoc({ lat, lng });
-        setEta((e: number) => Math.max(0, e - 0.1));
+        const distKm  = haversineKm(lat, lng, pickupLat, pickupLng);
+        const etaMins = Math.round((distKm / 30) * 60);
+        setEtaMinutes(etaMins);
+        setEta(etaMins);
       };
       answerer.onConnected    = () => setUsingWebRTC(true);
       answerer.onDisconnected = () => setUsingWebRTC(false);
@@ -161,7 +177,10 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         const msg = JSON.parse(event.data);
         if (msg.type === "DRIVER_LOCATION") {
           setDriverLoc({ lat: msg.lat, lng: msg.lng });
-          setEta((e: number) => Math.max(0, e - 0.1));
+          const distKm  = haversineKm(msg.lat, msg.lng, pickupLat, pickupLng);
+          const etaMins = Math.round((distKm / 30) * 60); // assume 30 km/h
+          setEtaMinutes(etaMins);
+          setEta(etaMins);
         }
         if (msg.type === "PROOF_SUBMITTED") {
           setStatus("pending_confirmation");
@@ -283,12 +302,14 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       const signer   = new ethers.Wallet(key, provider);
       const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
 
-      console.log("[ESCROW] createRide:", newRideId.slice(0,10), "fareWei:", fareWei, "PIN:", newPin);
+      const etaSeconds = BigInt(Math.round(originalEtaMins.current * 60));
+      console.log("[ESCROW] createRide:", newRideId.slice(0,10), "fareWei:", fareWei, "PIN:", newPin, "etaSecs:", etaSeconds.toString());
       const tx = await escrow.createRide(
         newRideId,
         driverWallet,
         arbitrator,
         pinHash,
+        etaSeconds,
         { value: BigInt(fareWei) }
       );
       console.log("[ESCROW] createRide tx:", tx.hash);
@@ -414,6 +435,34 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         }
       }},
     ]);
+  };
+
+  const handleCancelDueLate = async () => {
+    if (!rideId) return;
+    Alert.alert(
+      "Cancel Ride (Driver Late)",
+      "The driver is running late. You can cancel for a full refund.",
+      [
+        { text: "Keep Waiting", style: "cancel" },
+        { text: "Cancel Ride", style: "destructive", onPress: async () => {
+          setActionLoading(true);
+          try {
+            const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+            const signer   = new ethers.Wallet(privateKeyRef.current, provider);
+            const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
+            const tx = await escrow.cancelRide(rideId);
+            await tx.wait();
+            Alert.alert("Ride Cancelled", "Your full fare has been refunded.", [
+              { text: "OK", onPress: () => navigation.goBack() },
+            ]);
+          } catch (err: any) {
+            Alert.alert("Cancel Failed", err.message?.slice(0, 200));
+          } finally {
+            setActionLoading(false);
+          }
+        }},
+      ],
+    );
   };
 
   const handleExportLog = async () => {
@@ -568,28 +617,58 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
           </View>
         </View>
 
-        {/* PIN display */}
-        {status === "waiting_pickup" && pin !== null && (
-          <View style={[styles.pinCard, { backgroundColor: Colors.brandGlow, borderColor: Colors.brand }]}>
-            <Text style={[{ color: Colors.brandDim, fontSize: 11, fontWeight: "600",
-              letterSpacing: 1, textTransform: "uppercase", marginBottom: 6 }]}>
-              Pickup PIN — show to driver
-            </Text>
-            <Text style={[styles.pinText, { color: Colors.brand }]}>{pin}</Text>
-            <TouchableOpacity
-              style={[styles.pickupBtn, { borderColor: Colors.brand, opacity: actionLoading ? 0.7 : 1 }]}
-              onPress={handleConfirmPickup}
-              disabled={actionLoading}
-            >
-              {actionLoading
-                ? <ActivityIndicator color={Colors.brand} />
-                : <Text style={[{ color: Colors.brand, fontSize: 14, fontWeight: "600" }]}>
-                    I'm in the car ✓
+        {/* PIN display + live ETA */}
+        {status === "waiting_pickup" && pin !== null && (() => {
+          const driverLate = etaMinutes !== null && etaMinutes > originalEtaMins.current * 3;
+          return (
+            <View style={{ gap: 10 }}>
+              <View style={[styles.pinCard, { backgroundColor: Colors.brandGlow, borderColor: Colors.brand }]}>
+                <Text style={[{ color: Colors.brandDim, fontSize: 11, fontWeight: "600",
+                  letterSpacing: 1, textTransform: "uppercase", marginBottom: 6 }]}>
+                  Pickup PIN — show to driver
+                </Text>
+                <Text style={[styles.pinText, { color: Colors.brand }]}>{pin}</Text>
+                {etaMinutes !== null && (
+                  <Text style={{ color: Colors.brandDim, fontSize: 13, marginBottom: 8 }}>
+                    Driver arriving in {etaMinutes} min
                   </Text>
-              }
-            </TouchableOpacity>
-          </View>
-        )}
+                )}
+                <TouchableOpacity
+                  style={[styles.pickupBtn, { borderColor: Colors.brand, opacity: actionLoading ? 0.7 : 1 }]}
+                  onPress={handleConfirmPickup}
+                  disabled={actionLoading}
+                >
+                  {actionLoading
+                    ? <ActivityIndicator color={Colors.brand} />
+                    : <Text style={[{ color: Colors.brand, fontSize: 14, fontWeight: "600" }]}>
+                        I'm in the car ✓
+                      </Text>
+                  }
+                </TouchableOpacity>
+              </View>
+              {driverLate && (
+                <View style={[styles.successCard, { backgroundColor: "#1a0a00", borderColor: "#FF8800" }]}>
+                  <Text style={{ color: "#FF8800", fontSize: 14, fontWeight: "700", marginBottom: 8 }}>
+                    Driver is running late
+                  </Text>
+                  <Text style={{ color: colors.textSub, fontSize: 13, marginBottom: 12, textAlign: "center" }}>
+                    Your driver is {etaMinutes} min away (expected {originalEtaMins.current} min).
+                    You can cancel for a full refund.
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.disputeBtn, { borderColor: "#FF8800" }, actionLoading && { opacity: 0.7 }]}
+                    onPress={handleCancelDueLate}
+                    disabled={actionLoading}
+                  >
+                    <Text style={{ color: "#FF8800", fontSize: 14, fontWeight: "600" }}>
+                      Cancel (Full Refund)
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          );
+        })()}
 
         {/* Confirm / Dispute buttons after driver submits proof */}
         {status === "pending_confirmation" && (
