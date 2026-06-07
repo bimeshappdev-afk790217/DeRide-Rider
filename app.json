@@ -47,7 +47,8 @@
           "color": "#00E5A0",
           "sounds": []
         }
-      ]
+      ],
+      "expo-web-browser"
     ],
     "extra": {
       "eas": {

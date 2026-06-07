@@ -4,16 +4,25 @@ import {
   TextInput, Alert, ActivityIndicator, ScrollView,
 } from "react-native";
 import * as Crypto from "expo-crypto";
+import * as WebBrowser from "expo-web-browser";
 import { ethers } from "ethers";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 
+const POLYGON_RPC = process.env.EXPO_PUBLIC_ALCHEMY_URL
+  ?? "https://polygon-mainnet.g.alchemy.com/v2/Q25ZjjJ1haH3RxjFuVWuS";
+const MIN_BALANCE_POL = 0.01;
+
 export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) => {
   const { colors } = useTheme();
-  const [name, setName]       = useState("");
-  const [phone, setPhone]     = useState("");
-  const [loading, setLoading] = useState(false);
+  const [name, setName]               = useState("");
+  const [phone, setPhone]             = useState("");
+  const [loading, setLoading]         = useState(false);
+  const [step, setStep]               = useState<"form" | "fund">("form");
+  const [walletAddress, setWalletAddress] = useState("");
+  const [balance, setBalance]         = useState(0);
+  const [checking, setChecking]       = useState(false);
 
   const generateWallet = async () => {
     const randomBytes   = await Crypto.getRandomBytesAsync(32);
@@ -21,6 +30,34 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
       .map(b => b.toString(16).padStart(2, "0"));
     const privateKeyHex = "0x" + hexArray.join("");
     return new ethers.Wallet(privateKeyHex);
+  };
+
+  const checkBalance = async (address: string): Promise<number> => {
+    try {
+      const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+      const raw = await provider.getBalance(address);
+      return parseFloat(ethers.formatEther(raw));
+    } catch {
+      return 0;
+    }
+  };
+
+  const handleOpenTransak = async () => {
+    const url =
+      `https://global.transak.com?` +
+      `walletAddress=${encodeURIComponent(walletAddress)}&` +
+      `cryptoCurrencyCode=POL&` +
+      `network=polygon&` +
+      `defaultFiatAmount=10&` +
+      `hideMenu=true`;
+    await WebBrowser.openBrowserAsync(url);
+    setChecking(true);
+    const bal = await checkBalance(walletAddress);
+    setBalance(bal);
+    setChecking(false);
+    if (bal >= MIN_BALANCE_POL) {
+      onRegistered();
+    }
   };
 
   const handleRegister = async () => {
@@ -37,7 +74,16 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
       await AsyncStorage.setItem("rider_phone",          phone.trim());
 
       console.log("Rider wallet created:", wallet.address);
-      onRegistered();
+
+      const bal = await checkBalance(wallet.address);
+      setWalletAddress(wallet.address);
+      setBalance(bal);
+
+      if (bal >= MIN_BALANCE_POL) {
+        onRegistered();
+      } else {
+        setStep("fund");
+      }
 
     } catch (err: any) {
       console.error("Registration error:", err.message);
@@ -46,6 +92,68 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
       setLoading(false);
     }
   };
+
+  if (step === "fund") {
+    return (
+      <View style={[styles.container, { backgroundColor: colors.bg }]}>
+        <ScrollView contentContainerStyle={styles.scroll}>
+
+          <View style={styles.header}>
+            <Text style={styles.emoji}>💳</Text>
+            <Text style={[styles.title, { color: colors.text }]}>
+              Add funds to pay for rides
+            </Text>
+            <Text style={[styles.subtitle, { color: colors.textSub }]}>
+              Your wallet needs a small amount of POL to pay for rides
+              on the Polygon network.
+            </Text>
+          </View>
+
+          <View style={[styles.balanceCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+            <Text style={[styles.balanceLabel, { color: colors.textSub }]}>
+              Current balance
+            </Text>
+            <Text style={[styles.balanceValue, { color: colors.text }]}>
+              {balance.toFixed(4)} POL
+            </Text>
+            <Text style={[styles.balanceNeeded, { color: colors.textMuted }]}>
+              Minimum needed: {MIN_BALANCE_POL} POL (~$0.01)
+            </Text>
+          </View>
+
+          <View style={[styles.noteCard, { backgroundColor: colors.surfaceAlt }]}>
+            <Text style={[styles.noteText, { color: colors.textSub }]}>
+              🔐 Your wallet address:{"\n"}
+              <Text style={{ fontFamily: "monospace", fontSize: 11 }}>
+                {walletAddress}
+              </Text>
+            </Text>
+          </View>
+
+          <TouchableOpacity
+            style={[styles.btn, Shadow.brand, checking && { opacity: 0.7 }]}
+            onPress={handleOpenTransak}
+            disabled={checking}
+          >
+            {checking
+              ? <ActivityIndicator color="#000" />
+              : <Text style={styles.btnText}>Add funds with Card/UPI</Text>
+            }
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.skipBtn, { borderColor: colors.border }]}
+            onPress={onRegistered}
+          >
+            <Text style={[styles.skipText, { color: colors.textSub }]}>
+              Skip for now (fund later)
+            </Text>
+          </TouchableOpacity>
+
+        </ScrollView>
+      </View>
+    );
+  }
 
   return (
     <View style={[styles.container, { backgroundColor: colors.bg }]}>
@@ -164,4 +272,12 @@ const styles = StyleSheet.create({
   btn:          { backgroundColor: "#00E5A0", padding: 20,
                   borderRadius: 16, alignItems: "center" },
   btnText:      { color: "#000", fontSize: 16, fontWeight: "700" },
+  balanceCard:  { borderRadius: 16, borderWidth: 1, padding: 20,
+                  marginBottom: 16, alignItems: "center" },
+  balanceLabel: { fontSize: 13, marginBottom: 4 },
+  balanceValue: { fontSize: 32, fontWeight: "700", marginBottom: 4 },
+  balanceNeeded:{ fontSize: 12 },
+  skipBtn:      { marginTop: 12, padding: 16, borderRadius: 12,
+                  borderWidth: 1, alignItems: "center" },
+  skipText:     { fontSize: 14 },
 });
