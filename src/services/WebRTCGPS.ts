@@ -1,4 +1,3 @@
-import { RTCPeerConnection, RTCSessionDescription } from 'react-native-webrtc';
 import { ethers } from 'ethers';
 
 const ALCHEMY_URL   = process.env.EXPO_PUBLIC_ALCHEMY_URL               ?? "";
@@ -15,22 +14,20 @@ const RTC_CONFIG = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
 };
 
-async function waitForIce(pc: RTCPeerConnection): Promise<void> {
+// Vanilla ICE: wait for all candidates before sending SDP.
+// MessageRelay stores one message — the full SDP must go in a single postMessage.
+async function waitForIce(pc: any): Promise<void> {
   return new Promise<void>(resolve => {
-    if ((pc as any).iceGatheringState === 'complete') { resolve(); return; }
+    if (pc.iceGatheringState === 'complete') { resolve(); return; }
     const done = () => resolve();
-    (pc as any).onicecandidate = (e: any) => {
-      if (e.candidate === null) done();
-    };
-    (pc as any).onicegatheringstatechange = () => {
-      if ((pc as any).iceGatheringState === 'complete') done();
-    };
+    pc.onicecandidate = (e: any) => { if (e.candidate === null) done(); };
+    pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') done(); };
     setTimeout(done, 8000);
   });
 }
 
 export class WebRTCGPSAnswerer {
-  private pc:           RTCPeerConnection | null = null;
+  private pc:           any = null;
   private pollInterval: ReturnType<typeof setInterval> | null = null;
 
   onGPSUpdate?:    (lat: number, lng: number) => void;
@@ -38,18 +35,33 @@ export class WebRTCGPSAnswerer {
   onDisconnected?: () => void;
 
   async start(
-    privateKey:   string,
-    riderWallet:  string,
-    rideId:       string,
+    privateKey:  string,
+    riderWallet: string,
+    rideId:      string,
   ): Promise<void> {
     if (!ALCHEMY_URL || !MESSAGE_RELAY) {
       console.warn("[WEBRTC] ALCHEMY_URL or MESSAGE_RELAY not configured");
       return;
     }
-    if (typeof RTCPeerConnection === 'undefined' || RTCPeerConnection === null) {
-      console.warn("[WEBRTC] WebRTC not available in Expo Go — skipping GPS relay");
+
+    // Dynamic require — prevents native module from loading at startup in Expo Go.
+    // Must be scoped to start() so RTCPeerConnection/RTCSessionDescription are
+    // available to the setInterval closure below.
+    let RTCPeerConnection: any;
+    let RTCSessionDescription: any;
+    try {
+      const webrtc = require('react-native-webrtc');
+      RTCPeerConnection    = webrtc.RTCPeerConnection;
+      RTCSessionDescription = webrtc.RTCSessionDescription;
+    } catch {
+      console.warn("[WEBRTC] WebRTC not available in this environment — skipping GPS relay");
       return;
     }
+    if (!RTCPeerConnection) {
+      console.warn("[WEBRTC] WebRTC not available in this environment — skipping GPS relay");
+      return;
+    }
+
     console.log("[WEBRTC] Answerer waiting for driver offer (rideId:", rideId.slice(0, 10), ")");
 
     const provider   = new ethers.JsonRpcProvider(ALCHEMY_URL);
@@ -71,21 +83,10 @@ export class WebRTCGPSAnswerer {
         this.pollInterval = null;
         console.log("[WEBRTC] Got offer from driver:", (from as string).slice(0, 8));
 
-        let pc: RTCPeerConnection;
-        try {
-          pc = new RTCPeerConnection(RTC_CONFIG);
-        } catch (e: any) {
-          const msg: string = e.message ?? "";
-          if (msg.includes("native module") || msg.includes("Expo Go") || msg.includes("RTCPeerConnection")) {
-            console.warn("[WEBRTC] WebRTC not available in Expo Go — skipping GPS relay");
-          } else {
-            console.warn("[WEBRTC] RTCPeerConnection failed:", msg);
-          }
-          return;
-        }
+        const pc = new RTCPeerConnection(RTC_CONFIG);
         this.pc  = pc;
 
-        (pc as any).ondatachannel = (event: any) => {
+        pc.ondatachannel = (event: any) => {
           const channel = event.channel;
           console.log("[WEBRTC] Data channel received:", channel.label);
           channel.onopen    = () => { console.log("[WEBRTC] Data channel open"); this.onConnected?.(); };
@@ -105,13 +106,13 @@ export class WebRTCGPSAnswerer {
         await pc.setLocalDescription(answer);
         await waitForIce(pc);
 
-        const sdp = (pc.localDescription as any)?.sdp;
+        const sdp = pc.localDescription?.sdp;
         if (!sdp) { console.error("[WEBRTC] No answer SDP after ICE"); return; }
 
         // Clear offer from our inbox, then post answer to driver
         await relayWrite.clearMessage({ gasLimit: 100_000 });
-        const feeData  = await provider.getFeeData();
-        const maxFee   = feeData.maxFeePerGas! * 130n / 100n;
+        const feeData   = await provider.getFeeData();
+        const maxFee    = feeData.maxFeePerGas! * 130n / 100n;
         const answerMsg = JSON.stringify({ type: "WEBRTC_ANSWER", sdp });
         const tx = await relayWrite.postMessage(from, ethers.toUtf8Bytes(answerMsg), { maxFeePerGas: maxFee });
         await tx.wait();
