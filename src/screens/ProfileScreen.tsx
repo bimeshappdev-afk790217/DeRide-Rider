@@ -5,7 +5,8 @@ import {
 } from "react-native";
 import { ethers } from "ethers";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { openTransakOffRamp } from "../services/transak";
+import { getTransakOffRampUrl } from "../services/transak";
+import TransakWebView from "../components/TransakWebView";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 
@@ -34,6 +35,8 @@ export const ProfileScreen = ({ navigation }: any) => {
   const [totalRides, setTotalRides] = useState(0);
   const [loading, setLoading]       = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [showTransak, setShowTransak] = useState(false);
+  const [transakUrl, setTransakUrl]   = useState('');
 
   const fetchData = useCallback(async () => {
     try {
@@ -70,8 +73,10 @@ export const ProfileScreen = ({ navigation }: any) => {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const handleWithdraw = async () => {
-    if (address) await openTransakOffRamp(address);
+  const handleWithdraw = () => {
+    if (!address) return;
+    setTransakUrl(getTransakOffRampUrl(address));
+    setShowTransak(true);
   };
 
   const usdValue =
@@ -88,6 +93,7 @@ export const ProfileScreen = ({ navigation }: any) => {
   }
 
   return (
+    <View style={{ flex: 1 }}>
     <ScrollView
       style={{ flex: 1, backgroundColor: colors.bg }}
       contentContainerStyle={{ padding: 24 }}
@@ -178,6 +184,14 @@ export const ProfileScreen = ({ navigation }: any) => {
 
       <View style={{ height: 40 }} />
     </ScrollView>
+    {showTransak && (
+      <TransakWebView
+        url={transakUrl}
+        onClose={() => setShowTransak(false)}
+        onSuccess={() => { setShowTransak(false); fetchData(); }}
+      />
+    )}
+    </View>
   );
 };
 

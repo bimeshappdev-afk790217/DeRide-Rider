@@ -5,7 +5,8 @@ import {
 } from "react-native";
 import * as Crypto from "expo-crypto";
 import { ethers } from "ethers";
-import { openTransakOnRamp } from "../services/transak";
+import { getTransakOnRampUrl } from "../services/transak";
+import TransakWebView from "../components/TransakWebView";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import { useTheme } from "../theme/ThemeContext";
@@ -24,6 +25,8 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
   const [step, setStep]               = useState<"form" | "fund">("form");
   const [walletAddress, setWalletAddress] = useState("");
   const [balance, setBalance]         = useState(0);
+  const [showTransak, setShowTransak] = useState(false);
+  const [transakUrl, setTransakUrl]   = useState('');
 
   const generateWallet = async () => {
     const randomBytes   = await Crypto.getRandomBytesAsync(32);
@@ -43,8 +46,13 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
     }
   };
 
-  const handleOpenTransak = async () => {
-    await openTransakOnRamp(walletAddress);
+  const handleOpenTransak = () => {
+    setTransakUrl(getTransakOnRampUrl(walletAddress));
+    setShowTransak(true);
+  };
+
+  const handleTransakSuccess = async () => {
+    setShowTransak(false);
     setPollingBalance(true);
     try {
       for (let i = 0; i < 36; i++) {
@@ -158,6 +166,13 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
           </TouchableOpacity>
 
         </ScrollView>
+        {showTransak && (
+          <TransakWebView
+            url={transakUrl}
+            onClose={() => setShowTransak(false)}
+            onSuccess={handleTransakSuccess}
+          />
+        )}
       </View>
     );
   }
