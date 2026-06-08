@@ -6,6 +6,7 @@ import {
 import MapView, { Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as SecureStore from "expo-secure-store";
 import { ethers } from "ethers";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
@@ -200,7 +201,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     try {
       console.log("loadWalletAndStart: reading AsyncStorage...");
       const addr = await AsyncStorage.getItem("rider_wallet_address") ?? "";
-      const key  = await AsyncStorage.getItem("rider_wallet_key")     ?? "";
+      const key  = await SecureStore.getItemAsync("rider_wallet_key")  ?? "";
       console.log("Wallet loaded, addr:", addr ? addr.slice(0, 10) + "..." : "MISSING");
       console.log("Key loaded:", key ? "yes" : "MISSING");
       riderWalletRef.current = addr;

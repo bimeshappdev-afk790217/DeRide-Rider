@@ -7,6 +7,7 @@ import * as Crypto from "expo-crypto";
 import * as WebBrowser from "expo-web-browser";
 import { ethers } from "ethers";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as SecureStore from "expo-secure-store";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 
@@ -19,10 +20,10 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
   const [name, setName]               = useState("");
   const [phone, setPhone]             = useState("");
   const [loading, setLoading]         = useState(false);
+  const [pollingBalance, setPollingBalance] = useState(false);
   const [step, setStep]               = useState<"form" | "fund">("form");
   const [walletAddress, setWalletAddress] = useState("");
   const [balance, setBalance]         = useState(0);
-  const [checking, setChecking]       = useState(false);
 
   const generateWallet = async () => {
     const randomBytes   = await Crypto.getRandomBytesAsync(32);
@@ -45,18 +46,25 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
   const handleOpenTransak = async () => {
     const url =
       `https://global.transak.com?` +
-      `walletAddress=${encodeURIComponent(walletAddress)}&` +
+      `walletAddress=${walletAddress}&` +
       `cryptoCurrencyCode=POL&` +
       `network=polygon&` +
       `defaultFiatAmount=10&` +
-      `hideMenu=true`;
+      `fiatCurrency=INR`;
     await WebBrowser.openBrowserAsync(url);
-    setChecking(true);
-    const bal = await checkBalance(walletAddress);
-    setBalance(bal);
-    setChecking(false);
-    if (bal >= MIN_BALANCE_POL) {
-      onRegistered();
+    setPollingBalance(true);
+    try {
+      for (let i = 0; i < 36; i++) {
+        const bal = await checkBalance(walletAddress);
+        setBalance(bal);
+        if (bal >= MIN_BALANCE_POL) {
+          onRegistered();
+          return;
+        }
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    } finally {
+      setPollingBalance(false);
     }
   };
 
@@ -69,7 +77,7 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
       const wallet = await generateWallet();
 
       await AsyncStorage.setItem("rider_wallet_address", wallet.address);
-      await AsyncStorage.setItem("rider_wallet_key",     wallet.privateKey);
+      await SecureStore.setItemAsync("rider_wallet_key", wallet.privateKey);
       await AsyncStorage.setItem("rider_name",           name.trim());
       await AsyncStorage.setItem("rider_phone",          phone.trim());
 
@@ -131,15 +139,20 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
           </View>
 
           <TouchableOpacity
-            style={[styles.btn, Shadow.brand, checking && { opacity: 0.7 }]}
+            style={[styles.btn, Shadow.brand, pollingBalance && { opacity: 0.7 }]}
             onPress={handleOpenTransak}
-            disabled={checking}
+            disabled={pollingBalance}
           >
-            {checking
+            {pollingBalance
               ? <ActivityIndicator color="#000" />
               : <Text style={styles.btnText}>Add funds with Card/UPI</Text>
             }
           </TouchableOpacity>
+          {pollingBalance && (
+            <Text style={[styles.noteText, { color: Colors.brand, marginTop: 8 }]}>
+              Waiting for POL to arrive...
+            </Text>
+          )}
 
           <TouchableOpacity
             style={[styles.skipBtn, { borderColor: colors.border }]}

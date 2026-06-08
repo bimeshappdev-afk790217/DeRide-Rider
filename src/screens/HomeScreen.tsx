@@ -5,6 +5,7 @@ import {
 } from "react-native";
 import * as Updates from "expo-updates";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as SecureStore from "expo-secure-store";
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { ethers } from "ethers";
@@ -113,7 +114,7 @@ export const HomeScreen = ({ navigation }: any) => {
   const reportNodeFailure = (nodeAddr: string) => {
     if (!nodeAddr || !ethers.isAddress(nodeAddr)) return;
     // Fire-and-forget: rider signs with stored key
-    AsyncStorage.getItem("rider_wallet_key").then(key => {
+    SecureStore.getItemAsync("rider_wallet_key").then(key => {
       if (!key || !ALCHEMY_URL) return;
       const provider  = new ethers.JsonRpcProvider(ALCHEMY_URL);
       const signer    = new ethers.Wallet(key, provider);
