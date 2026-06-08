@@ -5,7 +5,7 @@ import {
 } from "react-native";
 import { ethers } from "ethers";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import PaymentWebView from "../components/PaymentWebView";
+import { openTransakOffRamp } from "../services/transak";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 
@@ -34,7 +34,6 @@ export const ProfileScreen = ({ navigation }: any) => {
   const [totalRides, setTotalRides] = useState(0);
   const [loading, setLoading]       = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [showPayment, setShowPayment] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
@@ -71,16 +70,8 @@ export const ProfileScreen = ({ navigation }: any) => {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const moonpayOffRampUrl = address
-    ? `https://sell.moonpay.com?` +
-      `walletAddress=${address}&` +
-      `baseCurrencyCode=matic_polygon&` +
-      `quoteCurrencyCode=inr`
-    : "";
-
-  const handlePaymentClose = async () => {
-    setShowPayment(false);
-    await fetchData();
+  const handleWithdraw = async () => {
+    if (address) await openTransakOffRamp(address);
   };
 
   const usdValue =
@@ -138,18 +129,10 @@ export const ProfileScreen = ({ navigation }: any) => {
       {balance != null && balance > 0 && (
         <TouchableOpacity
           style={[styles.withdrawBtn, Shadow.brand]}
-          onPress={() => setShowPayment(true)}
+          onPress={handleWithdraw}
         >
           <Text style={styles.withdrawText}>Withdraw to Bank</Text>
         </TouchableOpacity>
-      )}
-
-      {showPayment && moonpayOffRampUrl !== "" && (
-        <PaymentWebView
-          url={moonpayOffRampUrl}
-          onClose={handlePaymentClose}
-          onSuccess={handlePaymentClose}
-        />
       )}
 
       <View style={[styles.section, { backgroundColor: colors.surface, borderColor: colors.border }]}>
