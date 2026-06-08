@@ -103,6 +103,7 @@ export const HomeScreen = ({ navigation }: any) => {
   const [reason, setReason]               = useState("3 drivers nearby — good availability");
   const [riderLoc, setRiderLoc]           = useState<{ lat: number; lng: number } | null>(null);
   const [locationError, setLocationError] = useState(false);
+  const [updateStatus, setUpdateStatus]   = useState<"idle"|"checking"|"updating"|"uptodate">("idle");
   const [suggestions, setSuggestions]     = useState<any[]>([]);
   const [walletAddress, setWalletAddress] = useState("");
   const nodeAddressRef = useRef<string>("");
@@ -726,8 +727,30 @@ export const HomeScreen = ({ navigation }: any) => {
           <TouchableOpacity onPress={async () => { await AsyncStorage.clear(); await Updates.reloadAsync(); }}>
             <Text style={[styles.debugAction, { color: "#FF4444" }]}>🗑 Reset App</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => Updates.reloadAsync()}>
-            <Text style={[styles.debugAction, { color: Colors.brand }]}>🔄 Reload App</Text>
+          <TouchableOpacity
+            onPress={async () => {
+              setUpdateStatus("checking");
+              try {
+                const update = await Updates.checkForUpdateAsync();
+                if (update.isAvailable) {
+                  setUpdateStatus("updating");
+                  await Updates.fetchUpdateAsync();
+                  await Updates.reloadAsync();
+                } else {
+                  setUpdateStatus("uptodate");
+                  setTimeout(() => setUpdateStatus("idle"), 3000);
+                }
+              } catch {
+                setUpdateStatus("idle");
+              }
+            }}
+          >
+            <Text style={[styles.debugAction, { color: Colors.brand }]}>
+              {updateStatus === "checking" ? "⏳ Checking..." :
+               updateStatus === "updating"  ? "⬇ Updating..." :
+               updateStatus === "uptodate"  ? "✅ App is up to date" :
+               "🔄 Check for Updates"}
+            </Text>
           </TouchableOpacity>
           <Text style={[styles.debugInfo, { color: colors.textMuted }]}>
             Wallet: {walletAddress ? walletAddress.slice(0, 12) + "..." : "not set"}

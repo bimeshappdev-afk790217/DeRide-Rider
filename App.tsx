@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import * as Updates from "expo-updates";
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
@@ -103,10 +104,23 @@ const AppNavigator = ({ appState, setAppState }: { appState: AppState; setAppSta
   );
 };
 
+async function checkForUpdates() {
+  try {
+    const update = await Updates.checkForUpdateAsync();
+    if (update.isAvailable) {
+      await Updates.fetchUpdateAsync();
+      await Updates.reloadAsync();
+    }
+  } catch (e) {
+    console.log("Update check failed:", e);
+  }
+}
+
 function AppContent() {
   const [appState, setAppState] = useState<AppState>("loading");
 
   useEffect(() => {
+    checkForUpdates();
     checkWallet();
   }, []);
 
