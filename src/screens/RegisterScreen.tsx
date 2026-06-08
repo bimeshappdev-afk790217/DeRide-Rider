@@ -4,8 +4,8 @@ import {
   TextInput, Alert, ActivityIndicator, ScrollView,
 } from "react-native";
 import * as Crypto from "expo-crypto";
-import { Linking } from "react-native";
 import { ethers } from "ethers";
+import PaymentWebView from "../components/PaymentWebView";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import { useTheme } from "../theme/ThemeContext";
@@ -21,6 +21,7 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
   const [phone, setPhone]             = useState("");
   const [loading, setLoading]         = useState(false);
   const [pollingBalance, setPollingBalance] = useState(false);
+  const [showPayment, setShowPayment]       = useState(false);
   const [step, setStep]               = useState<"form" | "fund">("form");
   const [walletAddress, setWalletAddress] = useState("");
   const [balance, setBalance]         = useState(0);
@@ -43,21 +44,27 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
     }
   };
 
-  const handleOpenTransak = async () => {
-    const url =
-      `https://global.transak.com?` +
-      `walletAddress=${walletAddress}&` +
-      `cryptoCurrencyCode=POL&` +
-      `network=polygon&` +
-      `defaultFiatAmount=10&` +
-      `fiatCurrency=INR`;
-    await Linking.openURL(url);
+  const moonpayOnRampUrl =
+    `https://buy.moonpay.com?` +
+    `walletAddress=${walletAddress}&` +
+    `currencyCode=matic_polygon&` +
+    `baseCurrencyCode=inr&` +
+    `baseCurrencyAmount=500`;
+
+  const handlePaymentSuccess = () => {
+    setShowPayment(false);
+    onRegistered();
+  };
+
+  const handlePaymentClose = async () => {
+    setShowPayment(false);
     setPollingBalance(true);
     try {
       for (let i = 0; i < 36; i++) {
         const bal = await checkBalance(walletAddress);
         setBalance(bal);
         if (bal >= MIN_BALANCE_POL) {
+          setPollingBalance(false);
           onRegistered();
           return;
         }
@@ -140,7 +147,7 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
 
           <TouchableOpacity
             style={[styles.btn, Shadow.brand, pollingBalance && { opacity: 0.7 }]}
-            onPress={handleOpenTransak}
+            onPress={() => setShowPayment(true)}
             disabled={pollingBalance}
           >
             {pollingBalance
@@ -152,6 +159,14 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
             <Text style={[styles.noteText, { color: Colors.brand, marginTop: 8 }]}>
               Waiting for POL to arrive...
             </Text>
+          )}
+
+          {showPayment && (
+            <PaymentWebView
+              url={moonpayOnRampUrl}
+              onClose={handlePaymentClose}
+              onSuccess={handlePaymentSuccess}
+            />
           )}
 
           <TouchableOpacity

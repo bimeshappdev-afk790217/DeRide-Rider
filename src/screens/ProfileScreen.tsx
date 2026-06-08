@@ -5,6 +5,7 @@ import {
 } from "react-native";
 import { ethers } from "ethers";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import PaymentWebView from "../components/PaymentWebView";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 
@@ -31,9 +32,9 @@ export const ProfileScreen = ({ navigation }: any) => {
   const [balance, setBalance]     = useState<number | null>(null);
   const [polPrice, setPolPrice]   = useState<number | null>(null);
   const [totalRides, setTotalRides] = useState(0);
-  const [loading, setLoading]     = useState(true);
+  const [loading, setLoading]       = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [withdrawing, setWithdrawing] = useState(false);
+  const [showPayment, setShowPayment] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
@@ -70,22 +71,16 @@ export const ProfileScreen = ({ navigation }: any) => {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const handleWithdraw = async () => {
-    if (!address) return;
-    setWithdrawing(true);
-    try {
-      const url =
-        `https://global.transak.com?` +
-        `walletAddress=${address}&` +
-        `cryptoCurrencyCode=POL&` +
-        `network=polygon&` +
-        `productsAvailed=SELL&` +
-        `fiatCurrency=INR`;
-      await Linking.openURL(url);
-      await fetchData();
-    } finally {
-      setWithdrawing(false);
-    }
+  const moonpayOffRampUrl = address
+    ? `https://sell.moonpay.com?` +
+      `walletAddress=${address}&` +
+      `baseCurrencyCode=matic_polygon&` +
+      `quoteCurrencyCode=inr`
+    : "";
+
+  const handlePaymentClose = async () => {
+    setShowPayment(false);
+    await fetchData();
   };
 
   const usdValue =
@@ -142,15 +137,19 @@ export const ProfileScreen = ({ navigation }: any) => {
       {/* Withdraw to bank button — only if balance > 0 */}
       {balance != null && balance > 0 && (
         <TouchableOpacity
-          style={[styles.withdrawBtn, Shadow.brand, withdrawing && { opacity: 0.7 }]}
-          onPress={handleWithdraw}
-          disabled={withdrawing}
+          style={[styles.withdrawBtn, Shadow.brand]}
+          onPress={() => setShowPayment(true)}
         >
-          {withdrawing
-            ? <ActivityIndicator color="#000" />
-            : <Text style={styles.withdrawText}>Withdraw to Bank</Text>
-          }
+          <Text style={styles.withdrawText}>Withdraw to Bank</Text>
         </TouchableOpacity>
+      )}
+
+      {showPayment && moonpayOffRampUrl !== "" && (
+        <PaymentWebView
+          url={moonpayOffRampUrl}
+          onClose={handlePaymentClose}
+          onSuccess={handlePaymentClose}
+        />
       )}
 
       <View style={[styles.section, { backgroundColor: colors.surface, borderColor: colors.border }]}>
