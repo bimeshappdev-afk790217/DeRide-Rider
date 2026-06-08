@@ -4,7 +4,7 @@ import {
   TextInput, Alert, ActivityIndicator, ScrollView,
 } from "react-native";
 import * as Crypto from "expo-crypto";
-import * as WebBrowser from "expo-web-browser";
+import { Linking } from "react-native";
 import { ethers } from "ethers";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
@@ -51,7 +51,7 @@ export const RegisterScreen = ({ onRegistered }: { onRegistered: () => void }) =
       `network=polygon&` +
       `defaultFiatAmount=10&` +
       `fiatCurrency=INR`;
-    await WebBrowser.openBrowserAsync(url);
+    await Linking.openURL(url);
     setPollingBalance(true);
     try {
       for (let i = 0; i < 36; i++) {

@@ -3,7 +3,6 @@ import {
   View, Text, StyleSheet, ScrollView,
   TouchableOpacity, Linking, ActivityIndicator, RefreshControl,
 } from "react-native";
-import * as WebBrowser from "expo-web-browser";
 import { ethers } from "ethers";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useTheme } from "../theme/ThemeContext";
@@ -82,7 +81,7 @@ export const ProfileScreen = ({ navigation }: any) => {
         `network=polygon&` +
         `productsAvailed=SELL&` +
         `fiatCurrency=INR`;
-      await WebBrowser.openBrowserAsync(url);
+      await Linking.openURL(url);
       await fetchData();
     } finally {
       setWithdrawing(false);
