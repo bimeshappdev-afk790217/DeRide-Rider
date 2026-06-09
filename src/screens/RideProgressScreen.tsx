@@ -42,12 +42,13 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
 export const RideProgressScreen = ({ route, navigation }: any) => {
   const { colors } = useTheme();
   const _p = route.params;
-  const driver      = _p.driver;
-  const destination = _p.destination;
-  const pickupLat   = parseFloat(_p.pickupLat);
-  const pickupLng   = parseFloat(_p.pickupLng);
-  const destLat     = parseFloat(_p.destLat);
-  const destLng     = parseFloat(_p.destLng);
+  const driver         = _p.driver;
+  const destination    = _p.destination;
+  const pickupLat      = parseFloat(_p.pickupLat);
+  const pickupLng      = parseFloat(_p.pickupLng);
+  const destLat        = parseFloat(_p.destLat);
+  const destLng        = parseFloat(_p.destLng);
+  const offerMultiplier: number = _p.offerMultiplier ?? 100;
 
   type Status =
     | "confirming"          // calling /riders/confirm HTTP
@@ -258,9 +259,10 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          riderAddress:  riderWallet,
-          driverAddress: driverAddr,
+          riderAddress:    riderWallet,
+          driverAddress:   driverAddr,
           pickupLat, pickupLng, destLat, destLng,
+          offerMultiplier,
         }),
       });
       const data = await res.json();

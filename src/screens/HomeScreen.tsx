@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ScrollView, Animated, TextInput, StatusBar, Alert, FlatList,
+  ScrollView, Animated, TextInput, StatusBar, Alert, FlatList, Modal,
 } from "react-native";
 import * as Updates from "expo-updates";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -116,6 +116,15 @@ function formatDistMi(item: any, riderLoc: { lat: number; lng: number }): string
 const RECENT_DESTS_KEY = 'recent_destinations';
 interface RecentDest { name: string; address: string; lat: number; lng: number; savedAt: number; }
 
+interface OfferOption { multiplier: number; label: string; fareUSD: number; fareWei: string; }
+
+const OFFER_COLORS: Record<number, { bg: string; border: string; text: string }> = {
+  100: { bg: "transparent",  border: "transparent", text: "#00C880" },
+  125: { bg: "#E8F0FE",      border: "#007AFF",     text: "#007AFF" },
+  150: { bg: "#FFF3E0",      border: "#FF6600",     text: "#FF6600" },
+  200: { bg: "#FFEBEE",      border: "#FF3B30",     text: "#FF3B30" },
+};
+
 
 const DriverCard = ({ driver, onSelect, selected }: any) => {
   const { colors } = useTheme();
@@ -154,14 +163,14 @@ export const HomeScreen = ({ navigation }: any) => {
   const [routeCoords, setRouteCoords]     = useState<{ latitude: number; longitude: number }[]>([]);
   const [routeDistKm, setRouteDistKm]     = useState(0);
   const [routeDurMin, setRouteDurMin]     = useState(0);
-  const [searching, setSearching]         = useState(false);
-  const [loading, setLoading]             = useState(false);
-  const [drivers, setDrivers]             = useState<any[]>([]);
-  const [selected, setSelected]           = useState<any>(null);
-  const [multiplier, setMultiplier]       = useState(1.0);
-  const [reason, setReason]               = useState("");
-  const [emergencyMode, setEmergencyMode] = useState(false);
-  const [riderLoc, setRiderLoc]           = useState<{ lat: number; lng: number } | null>(null);
+  const [searching, setSearching]           = useState(false);
+  const [loading, setLoading]               = useState(false);
+  const [drivers, setDrivers]               = useState<any[]>([]);
+  const [selected, setSelected]             = useState<any>(null);
+  const [fareOffers, setFareOffers]         = useState<OfferOption[]>([]);
+  const [selectedOffer, setSelectedOffer]   = useState(100);
+  const [showOfferSheet, setShowOfferSheet] = useState(false);
+  const [riderLoc, setRiderLoc]             = useState<{ lat: number; lng: number } | null>(null);
   const [locationError, setLocationError] = useState(false);
   const [updateStatus, setUpdateStatus]   = useState<"idle"|"checking"|"updating"|"uptodate">("idle");
   const [suggestions, setSuggestions]     = useState<any[]>([]);
@@ -364,9 +373,11 @@ export const HomeScreen = ({ navigation }: any) => {
           if (!data.drivers || data.drivers.length === 0) continue;
 
           anySucceeded = true;
-          const fareUSD = data.fare?.estimatedUSD ?? 3.25;
-          const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc!.lat, riderLoc!.lng, resolved.lat, resolved.lng);
+          const fareUSD  = data.fare?.estimatedUSD ?? 3.25;
+          const distKm   = data.fare?.distanceKm   ?? haversineKm(riderLoc!.lat, riderLoc!.lng, resolved.lat, resolved.lng);
+          const offers   = (data.fare?.offers as OfferOption[] | undefined) ?? [];
           if (!combinedFareUSD) { combinedFareUSD = fareUSD; combinedDistKm = distKm; }
+          if (offers.length > 0) setFareOffers(offers);
 
           let phantomCount = 0;
           for (const d of data.drivers) {
@@ -427,8 +438,7 @@ export const HomeScreen = ({ navigation }: any) => {
         })));
       }
       setDrivers(driverList);
-      setMultiplier(1.0);
-      setReason(`NodeRegistry · ${sortedNodes.length} node(s)`);
+      setSelectedOffer(100);
       nodeAddressRef.current = sortedNodes[0]?.operator ?? "";
 
       verifyNodeFare(combinedFareUSD, combinedDistKm, sortedNodes[0]?.operator ?? "");
@@ -476,14 +486,20 @@ export const HomeScreen = ({ navigation }: any) => {
       ).filter(d => d !== null);
       console.log(`[CONTRACT] ${mapped.length} driver(s) available (not on a ride)`);
       console.log("[SEARCH] Drivers found:", mapped.length);
-      console.log("[SEARCH] Surge:", 1.0);
       if (process.env.EXPO_PUBLIC_DEBUG === "true") {
         console.log("[SEARCH] Driver locations:", mapped.map(d => ({
           wallet: d.address?.slice(0, 8), lat: d.lat, lng: d.lng, distanceMi: d.distanceMi,
         })));
       }
+      const baseFare = 3.25;
+      setFareOffers([
+        { multiplier: 100, label: "Standard",       fareUSD: baseFare,           fareWei: "0" },
+        { multiplier: 125, label: "Rush +25%",      fareUSD: baseFare * 1.25,    fareWei: "0" },
+        { multiplier: 150, label: "Priority +50%",  fareUSD: baseFare * 1.5,     fareWei: "0" },
+        { multiplier: 200, label: "Emergency 2×",   fareUSD: baseFare * 2.0,     fareWei: "0" },
+      ]);
+      setSelectedOffer(100);
       setDrivers(mapped);
-      setReason("On-chain driver availability");
     } catch (e: any) {
       console.error("[CONTRACT] getAvailableDrivers failed:", e.message);
       setDrivers([]);
@@ -501,7 +517,7 @@ export const HomeScreen = ({ navigation }: any) => {
     } catch {}
   }, []);
 
-  const searchDrivers = (dest: string, coords?: { lat: number; lng: number }, isEmergency = false) => {
+  const searchDrivers = (dest: string, coords?: { lat: number; lng: number }) => {
     if (!riderLoc) {
       Alert.alert("Location required", "Please enable location to find drivers.");
       return;
@@ -511,7 +527,6 @@ export const HomeScreen = ({ navigation }: any) => {
       Alert.alert("Select a destination", "Please choose a destination first.");
       return;
     }
-    setEmergencyMode(isEmergency);
     if (process.env.EXPO_PUBLIC_DEBUG === "true") {
       console.log("[SEARCH] Searching near:", riderLoc!.lat, riderLoc!.lng);
       console.log("[SEARCH] Destination:", resolved.lat, resolved.lng);
@@ -524,6 +539,9 @@ export const HomeScreen = ({ navigation }: any) => {
     setLoading(true);
     setDrivers([]);
     setSelected(null);
+    setFareOffers([]);
+    setSelectedOffer(100);
+    setShowOfferSheet(false);
     setRouteCoords([]);
     setRouteDistKm(0);
     setRouteDurMin(0);
@@ -564,7 +582,7 @@ export const HomeScreen = ({ navigation }: any) => {
           nodeAddressRef.current = data.nodeAddress ?? "";
           const fareUSD = data.fare?.estimatedUSD ?? 3.25;
           const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc!.lat, riderLoc!.lng, resolved.lat, resolved.lng);
-          const surge = data.fare?.multiplier ?? 1.0;
+          const offers  = (data.fare?.offers as OfferOption[] | undefined) ?? [];
           const mappedDrivers = data.drivers.map((d: any) => ({
             address:    d.address,
             lat:        parseFloat(d.lat),
@@ -576,11 +594,10 @@ export const HomeScreen = ({ navigation }: any) => {
             fareUSD,
           }));
           console.log("[SEARCH] Drivers found:", mappedDrivers.length);
-          console.log("[SEARCH] Surge:", surge);
           setDrivers(mappedDrivers);
-          setMultiplier(surge);
-          setReason(data.fare?.reason ?? "");
-          verifyNodeFare(fareUSD, distKm, data.nodeAddress ?? "", surge);
+          if (offers.length > 0) setFareOffers(offers);
+          setSelectedOffer(100);
+          verifyNodeFare(fareUSD, distKm, data.nodeAddress ?? "");
         } else {
           console.log("[SEARCH] Matching server returned no drivers — falling back to contract");
           await fetchFromContract(resolved);
@@ -615,7 +632,7 @@ export const HomeScreen = ({ navigation }: any) => {
       navigation.navigate("RideProgress", {
         driver: selected, destination,
         pickupLat, pickupLng, destLat, destLng,
-        isEmergency: emergencyMode,
+        offerMultiplier: selectedOffer,
       });
     } catch (error: any) {
       console.error("Ride creation error:", error);
@@ -788,24 +805,6 @@ export const HomeScreen = ({ navigation }: any) => {
                   </TouchableOpacity>
                 ))}
               </View>
-
-              <TouchableOpacity
-                style={[styles.emergencyBtn, { backgroundColor: colors.surface, borderColor: "#FF3B30" }]}
-                onPress={() => {
-                  if (!riderLoc) {
-                    Alert.alert("Location required", "Please enable location first.");
-                    return;
-                  }
-                  if (!destCoords) {
-                    Alert.alert("Select a destination", "Enter and select your destination above, then tap Emergency Ride.");
-                    return;
-                  }
-                  searchDrivers(destination, destCoords, true);
-                }}
-              >
-                <Text style={styles.emergencyBtnText}>🚨 Emergency Ride</Text>
-                <Text style={styles.emergencyBtnSub}>Priority dispatch · 2× fare</Text>
-              </TouchableOpacity>
             </>
           )}
         </ScrollView>
@@ -877,39 +876,17 @@ export const HomeScreen = ({ navigation }: any) => {
             transform: [{ translateY: slideAnim }],
           }]}>
             {(() => {
-              const n = drivers.length;
+              const n    = drivers.length;
               const dot  = n === 0 ? "🔴" : n <= 2 ? "🟡" : "🟢";
               const avail = n === 0 ? "No drivers available"
-                          : n <= 2 ? "Limited availability"
-                          : n <= 5 ? "Good availability"
-                          :          "High availability";
-              const surgeColor = emergencyMode ? "#FF3B30" : multiplier > 1 ? "#FF6600" : Colors.brand;
+                           : n <= 2 ? "Limited availability"
+                           : n <= 5 ? "Good availability"
+                           :          "High availability";
               return (
-                <View style={[styles.demandBar, {
-                  backgroundColor: emergencyMode ? "#FF3B3015" : colors.surfaceAlt,
-                  borderWidth: emergencyMode ? 1 : 0,
-                  borderColor: emergencyMode ? "#FF3B30" : "transparent",
-                }]}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[{ color: colors.textSub, fontSize: 12 }]}>
-                      {dot}  {n} driver{n !== 1 ? "s" : ""} nearby — {avail}
-                    </Text>
-                    {emergencyMode && (
-                      <Text style={{ fontSize: 10, color: "#FF3B30", fontWeight: "700", marginTop: 1 }}>
-                        🚨 Emergency Mode — Priority Dispatch
-                      </Text>
-                    )}
-                    {!emergencyMode && reason ? (
-                      <Text style={[{ color: colors.textMuted, fontSize: 10, marginTop: 1 }]}>
-                        {reason}
-                      </Text>
-                    ) : null}
-                  </View>
-                  {(multiplier !== 1.0 || emergencyMode) && (
-                    <Text style={{ fontSize: 12, fontWeight: "700", color: surgeColor }}>
-                      {emergencyMode ? "2.0×" : `${multiplier}×`}
-                    </Text>
-                  )}
+                <View style={[styles.demandBar, { backgroundColor: colors.surfaceAlt }]}>
+                  <Text style={[{ color: colors.textSub, fontSize: 12 }]}>
+                    {dot}  {n} driver{n !== 1 ? "s" : ""} nearby — {avail}
+                  </Text>
                 </View>
               );
             })()}
@@ -946,38 +923,91 @@ export const HomeScreen = ({ navigation }: any) => {
             )}
 
             {!loading && drivers.map((driver, i) => (
-              <DriverCard key={i} driver={driver} selected={selected} onSelect={setSelected} />
+              <DriverCard
+                key={i}
+                driver={driver}
+                selected={selected}
+                onSelect={d => { setSelected(d); setShowOfferSheet(true); }}
+              />
             ))}
 
             {selected && (
-              <TouchableOpacity style={[styles.confirmBtn, Shadow.brand]} onPress={confirmRide}>
+              <TouchableOpacity style={[styles.confirmBtn, Shadow.brand]} onPress={() => setShowOfferSheet(true)}>
                 <Text style={styles.confirmBtnText}>
-                  {emergencyMode ? "🚨 Emergency " : "Confirm "}{selected.vehicle} · ${selected.fareUSD}
-                </Text>
-              </TouchableOpacity>
-            )}
-
-            {!emergencyMode && destCoords && (
-              <TouchableOpacity
-                style={[styles.emergencyBtnSheet, { borderColor: "#FF3B30" }]}
-                onPress={() => searchDrivers(destination, destCoords, true)}
-              >
-                <Text style={styles.emergencyBtnSheetText}>🚨 Emergency Ride · 2× fare</Text>
-              </TouchableOpacity>
-            )}
-            {emergencyMode && (
-              <TouchableOpacity
-                style={[styles.emergencyBtnSheet, { borderColor: colors.border }]}
-                onPress={() => searchDrivers(destination, destCoords!, false)}
-              >
-                <Text style={[styles.emergencyBtnSheetText, { color: colors.textSub }]}>
-                  Cancel Emergency Mode
+                  Select Offer · {selected.vehicle}
                 </Text>
               </TouchableOpacity>
             )}
           </Animated.View>
         </View>
       )}
+
+      <Modal
+        visible={showOfferSheet}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowOfferSheet(false)}
+      >
+        <TouchableOpacity
+          style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.45)" }}
+          activeOpacity={1}
+          onPress={() => setShowOfferSheet(false)}
+        />
+        <View style={[styles.offerSheet, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <View style={styles.offerSheetHandle} />
+          <Text style={[styles.offerSheetTitle, { color: colors.text }]}>Choose Your Offer</Text>
+          <Text style={[styles.offerSheetSub, { color: colors.textSub }]}>
+            Higher offers are matched faster — penalty applies if driver rejects Priority or Emergency
+          </Text>
+
+          {fareOffers.map(offer => {
+            const oc       = OFFER_COLORS[offer.multiplier] ?? OFFER_COLORS[100];
+            const isActive = selectedOffer === offer.multiplier;
+            return (
+              <TouchableOpacity
+                key={offer.multiplier}
+                style={[
+                  styles.offerRow,
+                  {
+                    backgroundColor: isActive ? oc.bg : colors.surfaceAlt,
+                    borderColor:     isActive ? oc.border : colors.border,
+                  },
+                ]}
+                onPress={() => setSelectedOffer(offer.multiplier)}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.offerLabel, { color: isActive ? oc.text : colors.text }]}>
+                    {offer.label}
+                  </Text>
+                  {offer.multiplier >= 150 && (
+                    <Text style={[styles.offerWarning, { color: oc.text }]}>
+                      ⚠ Penalty if driver rejects
+                    </Text>
+                  )}
+                </View>
+                <Text style={[styles.offerFare, { color: isActive ? oc.text : colors.text }]}>
+                  ${offer.fareUSD.toFixed(2)}
+                </Text>
+                {isActive && (
+                  <Text style={[{ fontSize: 16, marginLeft: 8, color: oc.text }]}>✓</Text>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+
+          <TouchableOpacity
+            style={[styles.offerConfirmBtn, Shadow.brand]}
+            onPress={() => {
+              setShowOfferSheet(false);
+              confirmRide();
+            }}
+          >
+            <Text style={styles.offerConfirmText}>
+              Confirm · ${fareOffers.find(o => o.multiplier === selectedOffer)?.fareUSD.toFixed(2) ?? "—"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
 
       {process.env.EXPO_PUBLIC_DEBUG === "true" && (
         <View style={[styles.debugPanel, { backgroundColor: colors.surfaceAlt, borderColor: colors.border }]}>
@@ -1081,14 +1111,21 @@ const styles = StyleSheet.create({
   categoryChip:      { paddingVertical: 10, paddingHorizontal: 18, borderRadius: 20, borderWidth: 1 },
   categoryText:      { fontSize: 13, fontWeight: "600" },
   locationErrBox:    { borderRadius: 16, borderWidth: 1, padding: 24, alignItems: "center", marginBottom: 16 },
-  emergencyBtn:      { borderWidth: 1.5, borderRadius: 16, padding: 18, alignItems: "center",
-                       marginTop: 8, marginBottom: 8 },
-  emergencyBtnText:  { fontSize: 16, fontWeight: "700", color: "#FF3B30" },
-  emergencyBtnSub:   { fontSize: 12, color: "#FF3B30", opacity: 0.7, marginTop: 4 },
-  emergencyBtnSheet: { borderWidth: 1.5, borderRadius: 14, paddingVertical: 14,
-                       alignItems: "center", marginTop: 10 },
-  emergencyBtnSheetText: { fontSize: 14, fontWeight: "700", color: "#FF3B30" },
-  debugPanel:      { padding: 12, borderTopWidth: 1 },
+  offerSheet:       { borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                      borderWidth: 1, borderBottomWidth: 0, padding: 24, paddingBottom: 48 },
+  offerSheetHandle: { width: 36, height: 4, borderRadius: 2, backgroundColor: "#ccc",
+                      alignSelf: "center", marginBottom: 16 },
+  offerSheetTitle:  { fontSize: 18, fontWeight: "700", marginBottom: 4 },
+  offerSheetSub:    { fontSize: 12, marginBottom: 16 },
+  offerRow:         { flexDirection: "row", alignItems: "center", padding: 16,
+                      borderRadius: 14, borderWidth: 1.5, marginBottom: 10 },
+  offerLabel:       { fontSize: 15, fontWeight: "700" },
+  offerWarning:     { fontSize: 11, marginTop: 2 },
+  offerFare:        { fontSize: 18, fontWeight: "700" },
+  offerConfirmBtn:  { backgroundColor: "#00E5A0", padding: 18, borderRadius: 16,
+                      alignItems: "center", marginTop: 8 },
+  offerConfirmText: { color: "#000", fontSize: 16, fontWeight: "700" },
+  debugPanel:       { padding: 12, borderTopWidth: 1 },
   debugTitle:      { fontSize: 11, fontWeight: "700", marginBottom: 6 },
   debugAction:     { fontSize: 12, fontWeight: "600", marginBottom: 4 },
   debugInfo:       { fontSize: 10, marginTop: 2 },
