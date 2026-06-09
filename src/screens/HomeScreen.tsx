@@ -48,6 +48,31 @@ function encodeGeohash(lat: number, lng: number, precision = 4): string {
 
 const NEARBY_CATEGORIES = ["Airport", "Hospital", "Mall", "Restaurant"];
 
+async function getRoute(
+  fromLat: number, fromLng: number,
+  toLat: number,   toLng: number,
+): Promise<{ coords: { latitude: number; longitude: number }[]; distKm: number; durMin: number }> {
+  try {
+    const response = await fetch(
+      `https://router.project-osrm.org/route/v1/driving/` +
+      `${fromLng},${fromLat};${toLng},${toLat}` +
+      `?overview=full&geometries=geojson`
+    );
+    const data = await response.json();
+    if (data.routes?.[0]) {
+      const route = data.routes[0];
+      return {
+        coords: route.geometry.coordinates.map((c: number[]) => ({ latitude: c[1], longitude: c[0] })),
+        distKm: route.distance / 1000,
+        durMin: Math.ceil(route.duration / 60),
+      };
+    }
+  } catch (e) {
+    console.log("[ROUTE] OSRM fetch failed:", e);
+  }
+  return { coords: [], distKm: 0, durMin: 0 };
+}
+
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R    = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -126,6 +151,9 @@ export const HomeScreen = ({ navigation }: any) => {
   const { colors, isDark } = useTheme();
   const [destination, setDestination]     = useState("");
   const [destCoords, setDestCoords]       = useState<{ lat: number; lng: number } | null>(null);
+  const [routeCoords, setRouteCoords]     = useState<{ latitude: number; longitude: number }[]>([]);
+  const [routeDistKm, setRouteDistKm]     = useState(0);
+  const [routeDurMin, setRouteDurMin]     = useState(0);
   const [searching, setSearching]         = useState(false);
   const [loading, setLoading]             = useState(false);
   const [drivers, setDrivers]             = useState<any[]>([]);
@@ -494,8 +522,21 @@ export const HomeScreen = ({ navigation }: any) => {
     setLoading(true);
     setDrivers([]);
     setSelected(null);
+    setRouteCoords([]);
+    setRouteDistKm(0);
+    setRouteDurMin(0);
 
     Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, tension: 65, friction: 10 }).start();
+
+    // Fetch real road route in parallel with driver search
+    getRoute(riderLoc.lat, riderLoc.lng, resolved.lat, resolved.lng).then(({ coords, distKm, durMin }) => {
+      if (coords.length > 0) {
+        setRouteCoords(coords);
+        setRouteDistKm(distKm);
+        setRouteDurMin(durMin);
+        console.log("[ROUTE] Road distance:", distKm.toFixed(1), "km · ETA:", durMin, "min");
+      }
+    });
 
     (async () => {
       // 1. Try NodeRegistry (dynamic discovery)
@@ -580,6 +621,9 @@ export const HomeScreen = ({ navigation }: any) => {
   };
 
   const routeInfo = destCoords && riderLoc ? (() => {
+    if (routeDistKm > 0) {
+      return `${(routeDistKm * 0.621).toFixed(1)} miles · ~${routeDurMin} min`;
+    }
     const km   = haversineKm(riderLoc!.lat, riderLoc!.lng, destCoords.lat, destCoords.lng);
     const mi   = (km * 0.621).toFixed(1);
     const mins = Math.ceil(km / 0.5);
@@ -775,11 +819,18 @@ export const HomeScreen = ({ navigation }: any) => {
                 />
               )}
 
-              {/* Dashed route line */}
-              {riderLoc && destCoords && (
+              {/* Road route — real OSRM path, falls back to straight dashed line */}
+              {riderLoc && destCoords && routeCoords.length > 0 && (
+                <Polyline
+                  coordinates={routeCoords}
+                  strokeColor="#007AFF"
+                  strokeWidth={4}
+                />
+              )}
+              {riderLoc && destCoords && routeCoords.length === 0 && (
                 <Polyline
                   coordinates={[
-                    { latitude: riderLoc!.lat,   longitude: riderLoc!.lng },
+                    { latitude: riderLoc!.lat,  longitude: riderLoc!.lng },
                     { latitude: destCoords.lat, longitude: destCoords.lng },
                   ]}
                   strokeColor="#007AFF"
