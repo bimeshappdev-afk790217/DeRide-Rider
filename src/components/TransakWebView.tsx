@@ -1,10 +1,9 @@
 import { WebView } from 'react-native-webview'
-import { Modal, View, TouchableOpacity, Text, StyleSheet } from 'react-native'
+import { Modal, View, TouchableOpacity,
+         Text, StyleSheet, Alert } from 'react-native'
 
 export default function TransakWebView({
-  url,
-  onClose,
-  onSuccess
+  url, onClose, onSuccess
 }: {
   url: string
   onClose: () => void
@@ -12,25 +11,40 @@ export default function TransakWebView({
 }) {
   return (
     <Modal visible={true} animationType="slide">
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={onClose}>
-            <Text style={styles.close}>✕ Close</Text>
-          </TouchableOpacity>
-          <Text style={styles.title}>Add Money</Text>
-          <View style={{ width: 60 }} />
-        </View>
+      <View style={{ flex: 1, backgroundColor: '#000' }}>
+
+        {/* Always visible close button - high z-index */}
+        <TouchableOpacity
+          style={styles.closeButton}
+          onPress={onClose}>
+          <Text style={styles.closeText}>✕</Text>
+        </TouchableOpacity>
+
         <WebView
           source={{ uri: url }}
           sharedCookiesEnabled={true}
           domStorageEnabled={true}
           thirdPartyCookiesEnabled={true}
+          style={{ marginTop: 0 }}
+          onError={() => {
+            Alert.alert(
+              "Payment Unavailable",
+              "Could not load payment page. Please try again.",
+              [{ text: "Close", onPress: onClose }]
+            )
+          }}
+          onHttpError={(e) => {
+            if (e.nativeEvent.statusCode >= 400) {
+              Alert.alert(
+                "Payment Error",
+                "Payment page returned an error.",
+                [{ text: "Close", onPress: onClose }]
+              )
+            }
+          }}
           onNavigationStateChange={(state) => {
-            if (
-              state.url.includes('transak.com/order') ||
-              state.url.includes('status=SUCCESS') ||
-              state.url.includes('COMPLETED')
-            ) {
+            if (state.url.includes('status=SUCCESS') ||
+                state.url.includes('COMPLETED')) {
               onSuccess?.('')
               onClose()
             }
@@ -52,14 +66,21 @@ export default function TransakWebView({
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000' },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  closeButton: {
+    position: 'absolute',
+    top: 50,
+    right: 16,
+    zIndex: 999,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    borderRadius: 20,
+    width: 44,
+    height: 44,
+    justifyContent: 'center',
     alignItems: 'center',
-    padding: 16,
-    backgroundColor: '#111',
   },
-  close: { color: 'white', fontSize: 16, width: 60 },
-  title: { color: 'white', fontSize: 16, fontWeight: 'bold' },
+  closeText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
+  }
 })
