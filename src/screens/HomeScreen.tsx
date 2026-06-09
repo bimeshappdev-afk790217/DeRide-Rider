@@ -60,6 +60,37 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+function typeWeight(r: any): number {
+  const t = r.type || r.class || '';
+  if (t === 'city')                           return 0;
+  if (t === 'town')                           return 1;
+  if (t === 'suburb')                         return 2;
+  if (t === 'neighbourhood')                  return 3;
+  if (t === 'restaurant' || t === 'cafe')     return 1;
+  if (t === 'hospital'   || t === 'airport')  return 1;
+  return 4;
+}
+
+function formatSecondary(item: any): string {
+  const addr  = item.address ?? {};
+  const city  = addr.city || addr.town || addr.village || addr.suburb || '';
+  const state = addr.state || addr.country || '';
+  if (city && state) return `${city}, ${state}`;
+  if (city)  return city;
+  if (state) return state;
+  const parts = (item.display_name ?? '').split(',');
+  return parts.slice(1, 3).join(',').trim();
+}
+
+function formatDistMi(item: any, riderLoc: { lat: number; lng: number }): string {
+  const km = haversineKm(riderLoc.lat, riderLoc.lng, parseFloat(item.lat), parseFloat(item.lon));
+  const mi = km * 0.621;
+  return mi < 0.1 ? 'nearby' : `${mi.toFixed(1)} mi`;
+}
+
+const RECENT_DESTS_KEY = 'recent_destinations';
+interface RecentDest { name: string; address: string; lat: number; lng: number; savedAt: number; }
+
 
 const DriverCard = ({ driver, onSelect, selected }: any) => {
   const { colors } = useTheme();
@@ -99,13 +130,15 @@ export const HomeScreen = ({ navigation }: any) => {
   const [loading, setLoading]             = useState(false);
   const [drivers, setDrivers]             = useState<any[]>([]);
   const [selected, setSelected]           = useState<any>(null);
-  const [multiplier, setMultiplier]       = useState(0.9);
-  const [reason, setReason]               = useState("3 drivers nearby — good availability");
+  const [multiplier, setMultiplier]       = useState(1.0);
+  const [reason, setReason]               = useState("");
   const [riderLoc, setRiderLoc]           = useState<{ lat: number; lng: number } | null>(null);
   const [locationError, setLocationError] = useState(false);
   const [updateStatus, setUpdateStatus]   = useState<"idle"|"checking"|"updating"|"uptodate">("idle");
   const [suggestions, setSuggestions]     = useState<any[]>([]);
   const [walletAddress, setWalletAddress] = useState("");
+  const [countryCode, setCountryCode]     = useState("us");
+  const [recentDests, setRecentDests]     = useState<RecentDest[]>([]);
   const nodeAddressRef = useRef<string>("");
   const debounceRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mapRef    = useRef<MapView>(null);
@@ -149,13 +182,29 @@ export const HomeScreen = ({ navigation }: any) => {
     AsyncStorage.getItem("rider_wallet_address").then(addr => {
       if (addr) setWalletAddress(addr);
     }).catch(() => {});
+    AsyncStorage.getItem(RECENT_DESTS_KEY).then(raw => {
+      if (raw) setRecentDests(JSON.parse(raw));
+    }).catch(() => {});
     (async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status === 'granted') {
           const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-          setRiderLoc({ lat: loc.coords.latitude, lng: loc.coords.longitude });
+          const { latitude: lat, longitude: lng } = loc.coords;
+          setRiderLoc({ lat, lng });
           setLocationError(false);
+          // Reverse-geocode to get country code for biased search results
+          try {
+            const r = await fetch(
+              `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
+              { headers: { "User-Agent": "DeRide/1.0" } }
+            );
+            const geo = await r.json();
+            const cc  = (geo?.address?.country_code ?? 'us').toLowerCase();
+            setCountryCode(cc);
+          } catch {
+            // keep default 'us'
+          }
         } else {
           setLocationError(true);
         }
@@ -171,32 +220,48 @@ export const HomeScreen = ({ navigation }: any) => {
     try {
       const resp = await fetch(
         `https://nominatim.openstreetmap.org/search?` +
-        `q=${encodeURIComponent(input)}&format=json&limit=5` +
-        `&lat=${riderLoc!.lat}&lon=${riderLoc!.lng}&addressdetails=1`,
+        `q=${encodeURIComponent(input)}&format=json&limit=10&addressdetails=1` +
+        `&countrycodes=${countryCode}` +
+        `&lat=${riderLoc.lat}&lon=${riderLoc.lng}`,
         { headers: { "User-Agent": "DeRide/1.0" } }
       );
       const results: any[] = await resp.json();
-      setSuggestions(results);
+      const sorted = [...results].sort((a, b) => {
+        const distA = haversineKm(riderLoc.lat, riderLoc.lng, parseFloat(a.lat), parseFloat(a.lon));
+        const distB = haversineKm(riderLoc.lat, riderLoc.lng, parseFloat(b.lat), parseFloat(b.lon));
+        const scoreA = distA * 0.7 + typeWeight(a) * 10;
+        const scoreB = distB * 0.7 + typeWeight(b) * 10;
+        return scoreA - scoreB;
+      });
+      setSuggestions(sorted.slice(0, 6));
     } catch {
       setSuggestions([]);
     }
-  }, [riderLoc]);
+  }, [riderLoc, countryCode]);
 
   const searchNearbyCategory = useCallback(async (category: string) => {
     if (!riderLoc) return;
     try {
       const resp = await fetch(
         `https://nominatim.openstreetmap.org/search?` +
-        `q=${encodeURIComponent(category)}&format=json&limit=5` +
-        `&lat=${riderLoc!.lat}&lon=${riderLoc!.lng}&addressdetails=1`,
+        `q=${encodeURIComponent(category)}&format=json&limit=10&addressdetails=1` +
+        `&countrycodes=${countryCode}` +
+        `&lat=${riderLoc.lat}&lon=${riderLoc.lng}`,
         { headers: { "User-Agent": "DeRide/1.0" } }
       );
       const results: any[] = await resp.json();
-      setSuggestions(results);
+      const sorted = [...results].sort((a, b) => {
+        const distA = haversineKm(riderLoc.lat, riderLoc.lng, parseFloat(a.lat), parseFloat(a.lon));
+        const distB = haversineKm(riderLoc.lat, riderLoc.lng, parseFloat(b.lat), parseFloat(b.lon));
+        const scoreA = distA * 0.7 + typeWeight(a) * 10;
+        const scoreB = distB * 0.7 + typeWeight(b) * 10;
+        return scoreA - scoreB;
+      });
+      setSuggestions(sorted.slice(0, 6));
     } catch {
       setSuggestions([]);
     }
-  }, [riderLoc]);
+  }, [riderLoc, countryCode]);
 
   // Fit map to show both pickup and destination after search starts
   useEffect(() => {
@@ -325,8 +390,9 @@ export const HomeScreen = ({ navigation }: any) => {
       if (!anySucceeded || allDrivers.size === 0) return false;
 
       const driverList = Array.from(allDrivers.values());
+      console.log("[SEARCH] Drivers found:", driverList.length);
+      console.log("[SEARCH] Surge:", 1.0);
       if (process.env.EXPO_PUBLIC_DEBUG === "true") {
-        console.log("[SEARCH] Drivers found:", driverList.length);
         console.log("[SEARCH] Driver locations:", driverList.map(d => ({
           wallet: d.address?.slice(0, 8), lat: d.lat, lng: d.lng, distanceMi: d.distanceMi,
         })));
@@ -380,8 +446,9 @@ export const HomeScreen = ({ navigation }: any) => {
         )
       ).filter(d => d !== null);
       console.log(`[CONTRACT] ${mapped.length} driver(s) available (not on a ride)`);
+      console.log("[SEARCH] Drivers found:", mapped.length);
+      console.log("[SEARCH] Surge:", 1.0);
       if (process.env.EXPO_PUBLIC_DEBUG === "true") {
-        console.log("[SEARCH] Drivers found:", mapped.length);
         console.log("[SEARCH] Driver locations:", mapped.map(d => ({
           wallet: d.address?.slice(0, 8), lat: d.lat, lng: d.lng, distanceMi: d.distanceMi,
         })));
@@ -393,6 +460,17 @@ export const HomeScreen = ({ navigation }: any) => {
       setDrivers([]);
     }
   };
+
+  const saveRecentDest = useCallback(async (name: string, address: string, lat: number, lng: number) => {
+    try {
+      const raw  = await AsyncStorage.getItem(RECENT_DESTS_KEY);
+      const prev: RecentDest[] = raw ? JSON.parse(raw) : [];
+      const deduped = prev.filter(d => !(Math.abs(d.lat - lat) < 0.0001 && Math.abs(d.lng - lng) < 0.0001));
+      const next = [{ name, address, lat, lng, savedAt: Date.now() }, ...deduped].slice(0, 5);
+      await AsyncStorage.setItem(RECENT_DESTS_KEY, JSON.stringify(next));
+      setRecentDests(next);
+    } catch {}
+  }, []);
 
   const searchDrivers = (dest: string, coords?: { lat: number; lng: number }) => {
     if (!riderLoc) {
@@ -412,6 +490,7 @@ export const HomeScreen = ({ navigation }: any) => {
     setDestCoords(resolved);
     setSuggestions([]);
     setSearching(true);
+    saveRecentDest(dest.split(",")[0].trim(), dest, resolved.lat, resolved.lng);
     setLoading(true);
     setDrivers([]);
     setSelected(null);
@@ -442,7 +521,8 @@ export const HomeScreen = ({ navigation }: any) => {
           nodeAddressRef.current = data.nodeAddress ?? "";
           const fareUSD = data.fare?.estimatedUSD ?? 3.25;
           const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc!.lat, riderLoc!.lng, resolved.lat, resolved.lng);
-          setDrivers(data.drivers.map((d: any) => ({
+          const surge = data.fare?.multiplier ?? 1.0;
+          const mappedDrivers = data.drivers.map((d: any) => ({
             address:    d.address,
             lat:        parseFloat(d.lat),
             lng:        parseFloat(d.lng),
@@ -451,8 +531,11 @@ export const HomeScreen = ({ navigation }: any) => {
             eta:        d.etaMinutes ?? 3,
             distanceMi: ((d.distanceKm ?? 1) * 0.621).toFixed(1),
             fareUSD,
-          })));
-          setMultiplier(data.fare?.multiplier ?? 1.0);
+          }));
+          console.log("[SEARCH] Drivers found:", mappedDrivers.length);
+          console.log("[SEARCH] Surge:", surge);
+          setDrivers(mappedDrivers);
+          setMultiplier(surge);
           setReason(data.fare?.reason ?? "");
           verifyNodeFare(fareUSD, distKm, data.nodeAddress ?? "");
         } else {
@@ -555,27 +638,80 @@ export const HomeScreen = ({ navigation }: any) => {
           />
         </View>
 
-        {/* Autocomplete dropdown */}
+        {/* Autocomplete dropdown — live results */}
         {suggestions.length > 0 && (
           <FlatList
             data={suggestions}
             keyExtractor={(_, i) => String(i)}
             style={[styles.suggestList, { backgroundColor: colors.surface, borderColor: colors.border }]}
             keyboardShouldPersistTaps="handled"
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={[styles.suggestItem, { borderBottomColor: colors.border }]}
-                onPress={() => searchDrivers(item.display_name, { lat: parseFloat(item.lat), lng: parseFloat(item.lon) })}
-              >
-                <Text style={[styles.suggestName, { color: colors.text }]} numberOfLines={1}>
-                  {item.name || item.display_name.split(",")[0]}
-                </Text>
-                <Text style={[styles.suggestAddr, { color: colors.textSub }]} numberOfLines={1}>
-                  {item.display_name}
-                </Text>
-              </TouchableOpacity>
-            )}
+            renderItem={({ item }) => {
+              const primary   = item.name || item.display_name.split(",")[0];
+              const secondary = formatSecondary(item);
+              const distText  = riderLoc ? formatDistMi(item, riderLoc) : '';
+              return (
+                <TouchableOpacity
+                  style={[styles.suggestItem, { borderBottomColor: colors.border }]}
+                  onPress={() => searchDrivers(
+                    item.display_name,
+                    { lat: parseFloat(item.lat), lng: parseFloat(item.lon) }
+                  )}
+                >
+                  <View style={styles.suggestRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.suggestName, { color: colors.text }]} numberOfLines={1}>
+                        {primary}
+                      </Text>
+                      {secondary ? (
+                        <Text style={[styles.suggestAddr, { color: colors.textSub }]} numberOfLines={1}>
+                          {secondary}
+                        </Text>
+                      ) : null}
+                    </View>
+                    {distText ? (
+                      <Text style={[styles.suggestDist, { color: colors.textMuted }]}>{distText}</Text>
+                    ) : null}
+                  </View>
+                </TouchableOpacity>
+              );
+            }}
           />
+        )}
+
+        {/* Recent destinations — shown when input is empty */}
+        {suggestions.length === 0 && destination.length === 0 && recentDests.length > 0 && (
+          <View style={[styles.suggestList, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+            <Text style={[styles.recentHeader, { color: colors.textMuted }]}>🕐  Recent</Text>
+            {recentDests.map((item, i) => {
+              const distText = riderLoc
+                ? (() => {
+                    const mi = haversineKm(riderLoc.lat, riderLoc.lng, item.lat, item.lng) * 0.621;
+                    return mi < 0.1 ? 'nearby' : `${mi.toFixed(1)} mi`;
+                  })()
+                : '';
+              return (
+                <TouchableOpacity
+                  key={i}
+                  style={[styles.suggestItem, { borderBottomColor: colors.border }]}
+                  onPress={() => searchDrivers(item.address, { lat: item.lat, lng: item.lng })}
+                >
+                  <View style={styles.suggestRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.suggestName, { color: colors.text }]} numberOfLines={1}>
+                        {item.name}
+                      </Text>
+                      <Text style={[styles.suggestAddr, { color: colors.textSub }]} numberOfLines={1}>
+                        {item.address.split(",").slice(1, 3).join(",").trim()}
+                      </Text>
+                    </View>
+                    {distText ? (
+                      <Text style={[styles.suggestDist, { color: colors.textMuted }]}>{distText}</Text>
+                    ) : null}
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
         )}
       </View>
 
@@ -668,12 +804,34 @@ export const HomeScreen = ({ navigation }: any) => {
             backgroundColor: colors.surface, borderColor: colors.border,
             transform: [{ translateY: slideAnim }],
           }]}>
-            <View style={[styles.demandBar, { backgroundColor: colors.surfaceAlt }]}>
-              <Text style={[{ color: colors.textSub, fontSize: 12 }]}>
-                {multiplier < 1 ? "🟢" : multiplier === 1 ? "🟡" : "🔴"} {reason}
-              </Text>
-              <Text style={[{ color: Colors.brand, fontSize: 12, fontWeight: "700" }]}>{multiplier}x</Text>
-            </View>
+            {(() => {
+              const n = drivers.length;
+              const dot  = n === 0 ? "🔴" : n <= 2 ? "🟡" : "🟢";
+              const avail = n === 0 ? "No drivers available"
+                          : n <= 2 ? "Limited availability"
+                          : n <= 5 ? "Good availability"
+                          :          "High availability";
+              const surgeColor = multiplier > 1 ? "#FF6600" : Colors.brand;
+              return (
+                <View style={[styles.demandBar, { backgroundColor: colors.surfaceAlt }]}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[{ color: colors.textSub, fontSize: 12 }]}>
+                      {dot}  {n} driver{n !== 1 ? "s" : ""} nearby — {avail}
+                    </Text>
+                    {reason ? (
+                      <Text style={[{ color: colors.textMuted, fontSize: 10, marginTop: 1 }]}>
+                        {reason}
+                      </Text>
+                    ) : null}
+                  </View>
+                  {multiplier !== 1.0 && (
+                    <Text style={{ fontSize: 12, fontWeight: "700", color: surgeColor }}>
+                      {multiplier}x
+                    </Text>
+                  )}
+                </View>
+              );
+            })()}
 
             <Text style={[styles.sectionTitle, { color: colors.text, marginBottom: 12 }]}>
               Available Drivers
@@ -811,10 +969,14 @@ const styles = StyleSheet.create({
   driverEta:      { fontSize: 12, marginTop: 2 },
   confirmBtn:      { backgroundColor: "#00E5A0", padding: 20, borderRadius: 16, alignItems: "center", marginTop: 8 },
   confirmBtnText:  { color: "#000", fontSize: 16, fontWeight: "700" },
-  suggestList:     { maxHeight: 220, borderRadius: 12, borderWidth: 1, marginTop: 4, overflow: "hidden" },
-  suggestItem:     { paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1 },
-  suggestName:     { fontSize: 14, fontWeight: "600" },
-  suggestAddr:     { fontSize: 11, marginTop: 2 },
+  suggestList:    { maxHeight: 280, borderRadius: 12, borderWidth: 1, marginTop: 4, overflow: "hidden" },
+  suggestItem:    { paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1 },
+  suggestRow:     { flexDirection: "row", alignItems: "center", gap: 8 },
+  suggestName:    { fontSize: 14, fontWeight: "600" },
+  suggestAddr:    { fontSize: 11, marginTop: 2 },
+  suggestDist:    { fontSize: 11, fontWeight: "600", minWidth: 48, textAlign: "right" },
+  recentHeader:   { fontSize: 11, fontWeight: "700", paddingHorizontal: 14, paddingTop: 8, paddingBottom: 4,
+                    textTransform: "uppercase", letterSpacing: 0.5 },
   categoryRow:     { flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 16 },
   categoryChip:    { paddingVertical: 10, paddingHorizontal: 18, borderRadius: 20, borderWidth: 1 },
   categoryText:    { fontSize: 13, fontWeight: "600" },
