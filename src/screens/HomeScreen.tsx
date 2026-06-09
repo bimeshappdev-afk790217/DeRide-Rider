@@ -160,6 +160,7 @@ export const HomeScreen = ({ navigation }: any) => {
   const [selected, setSelected]           = useState<any>(null);
   const [multiplier, setMultiplier]       = useState(1.0);
   const [reason, setReason]               = useState("");
+  const [emergencyMode, setEmergencyMode] = useState(false);
   const [riderLoc, setRiderLoc]           = useState<{ lat: number; lng: number } | null>(null);
   const [locationError, setLocationError] = useState(false);
   const [updateStatus, setUpdateStatus]   = useState<"idle"|"checking"|"updating"|"uptodate">("idle");
@@ -187,8 +188,8 @@ export const HomeScreen = ({ navigation }: any) => {
     }).catch(() => {});
   };
 
-  const verifyNodeFare = (quotedUSD: number, distanceKm: number, nodeAddr: string) => {
-    const expectedUSD = BASE_FARE_USD + distanceKm * PER_KM_RATE;
+  const verifyNodeFare = (quotedUSD: number, distanceKm: number, nodeAddr: string, serverMultiplier = 1.0) => {
+    const expectedUSD = (BASE_FARE_USD + distanceKm * PER_KM_RATE) * serverMultiplier;
     const ratio       = Math.abs(quotedUSD - expectedUSD) / expectedUSD;
     console.log(`[FARE] Quoted: $${quotedUSD.toFixed(2)}, Expected: $${expectedUSD.toFixed(2)}, diff: ${(ratio * 100).toFixed(0)}%`);
 
@@ -500,7 +501,7 @@ export const HomeScreen = ({ navigation }: any) => {
     } catch {}
   }, []);
 
-  const searchDrivers = (dest: string, coords?: { lat: number; lng: number }) => {
+  const searchDrivers = (dest: string, coords?: { lat: number; lng: number }, isEmergency = false) => {
     if (!riderLoc) {
       Alert.alert("Location required", "Please enable location to find drivers.");
       return;
@@ -510,6 +511,7 @@ export const HomeScreen = ({ navigation }: any) => {
       Alert.alert("Select a destination", "Please choose a destination first.");
       return;
     }
+    setEmergencyMode(isEmergency);
     if (process.env.EXPO_PUBLIC_DEBUG === "true") {
       console.log("[SEARCH] Searching near:", riderLoc!.lat, riderLoc!.lng);
       console.log("[SEARCH] Destination:", resolved.lat, resolved.lng);
@@ -578,7 +580,7 @@ export const HomeScreen = ({ navigation }: any) => {
           setDrivers(mappedDrivers);
           setMultiplier(surge);
           setReason(data.fare?.reason ?? "");
-          verifyNodeFare(fareUSD, distKm, data.nodeAddress ?? "");
+          verifyNodeFare(fareUSD, distKm, data.nodeAddress ?? "", surge);
         } else {
           console.log("[SEARCH] Matching server returned no drivers — falling back to contract");
           await fetchFromContract(resolved);
@@ -613,6 +615,7 @@ export const HomeScreen = ({ navigation }: any) => {
       navigation.navigate("RideProgress", {
         driver: selected, destination,
         pickupLat, pickupLng, destLat, destLng,
+        isEmergency: emergencyMode,
       });
     } catch (error: any) {
       console.error("Ride creation error:", error);
@@ -785,6 +788,24 @@ export const HomeScreen = ({ navigation }: any) => {
                   </TouchableOpacity>
                 ))}
               </View>
+
+              <TouchableOpacity
+                style={[styles.emergencyBtn, { backgroundColor: colors.surface, borderColor: "#FF3B30" }]}
+                onPress={() => {
+                  if (!riderLoc) {
+                    Alert.alert("Location required", "Please enable location first.");
+                    return;
+                  }
+                  if (!destCoords) {
+                    Alert.alert("Select a destination", "Enter and select your destination above, then tap Emergency Ride.");
+                    return;
+                  }
+                  searchDrivers(destination, destCoords, true);
+                }}
+              >
+                <Text style={styles.emergencyBtnText}>🚨 Emergency Ride</Text>
+                <Text style={styles.emergencyBtnSub}>Priority dispatch · 2× fare</Text>
+              </TouchableOpacity>
             </>
           )}
         </ScrollView>
@@ -862,22 +883,31 @@ export const HomeScreen = ({ navigation }: any) => {
                           : n <= 2 ? "Limited availability"
                           : n <= 5 ? "Good availability"
                           :          "High availability";
-              const surgeColor = multiplier > 1 ? "#FF6600" : Colors.brand;
+              const surgeColor = emergencyMode ? "#FF3B30" : multiplier > 1 ? "#FF6600" : Colors.brand;
               return (
-                <View style={[styles.demandBar, { backgroundColor: colors.surfaceAlt }]}>
+                <View style={[styles.demandBar, {
+                  backgroundColor: emergencyMode ? "#FF3B3015" : colors.surfaceAlt,
+                  borderWidth: emergencyMode ? 1 : 0,
+                  borderColor: emergencyMode ? "#FF3B30" : "transparent",
+                }]}>
                   <View style={{ flex: 1 }}>
                     <Text style={[{ color: colors.textSub, fontSize: 12 }]}>
                       {dot}  {n} driver{n !== 1 ? "s" : ""} nearby — {avail}
                     </Text>
-                    {reason ? (
+                    {emergencyMode && (
+                      <Text style={{ fontSize: 10, color: "#FF3B30", fontWeight: "700", marginTop: 1 }}>
+                        🚨 Emergency Mode — Priority Dispatch
+                      </Text>
+                    )}
+                    {!emergencyMode && reason ? (
                       <Text style={[{ color: colors.textMuted, fontSize: 10, marginTop: 1 }]}>
                         {reason}
                       </Text>
                     ) : null}
                   </View>
-                  {multiplier !== 1.0 && (
+                  {(multiplier !== 1.0 || emergencyMode) && (
                     <Text style={{ fontSize: 12, fontWeight: "700", color: surgeColor }}>
-                      {multiplier}x
+                      {emergencyMode ? "2.0×" : `${multiplier}×`}
                     </Text>
                   )}
                 </View>
@@ -922,7 +952,26 @@ export const HomeScreen = ({ navigation }: any) => {
             {selected && (
               <TouchableOpacity style={[styles.confirmBtn, Shadow.brand]} onPress={confirmRide}>
                 <Text style={styles.confirmBtnText}>
-                  Confirm {selected.vehicle} · ${selected.fareUSD}
+                  {emergencyMode ? "🚨 Emergency " : "Confirm "}{selected.vehicle} · ${selected.fareUSD}
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            {!emergencyMode && destCoords && (
+              <TouchableOpacity
+                style={[styles.emergencyBtnSheet, { borderColor: "#FF3B30" }]}
+                onPress={() => searchDrivers(destination, destCoords, true)}
+              >
+                <Text style={styles.emergencyBtnSheetText}>🚨 Emergency Ride · 2× fare</Text>
+              </TouchableOpacity>
+            )}
+            {emergencyMode && (
+              <TouchableOpacity
+                style={[styles.emergencyBtnSheet, { borderColor: colors.border }]}
+                onPress={() => searchDrivers(destination, destCoords!, false)}
+              >
+                <Text style={[styles.emergencyBtnSheetText, { color: colors.textSub }]}>
+                  Cancel Emergency Mode
                 </Text>
               </TouchableOpacity>
             )}
@@ -1028,10 +1077,17 @@ const styles = StyleSheet.create({
   suggestDist:    { fontSize: 11, fontWeight: "600", minWidth: 48, textAlign: "right" },
   recentHeader:   { fontSize: 11, fontWeight: "700", paddingHorizontal: 14, paddingTop: 8, paddingBottom: 4,
                     textTransform: "uppercase", letterSpacing: 0.5 },
-  categoryRow:     { flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 16 },
-  categoryChip:    { paddingVertical: 10, paddingHorizontal: 18, borderRadius: 20, borderWidth: 1 },
-  categoryText:    { fontSize: 13, fontWeight: "600" },
-  locationErrBox:  { borderRadius: 16, borderWidth: 1, padding: 24, alignItems: "center", marginBottom: 16 },
+  categoryRow:       { flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 16 },
+  categoryChip:      { paddingVertical: 10, paddingHorizontal: 18, borderRadius: 20, borderWidth: 1 },
+  categoryText:      { fontSize: 13, fontWeight: "600" },
+  locationErrBox:    { borderRadius: 16, borderWidth: 1, padding: 24, alignItems: "center", marginBottom: 16 },
+  emergencyBtn:      { borderWidth: 1.5, borderRadius: 16, padding: 18, alignItems: "center",
+                       marginTop: 8, marginBottom: 8 },
+  emergencyBtnText:  { fontSize: 16, fontWeight: "700", color: "#FF3B30" },
+  emergencyBtnSub:   { fontSize: 12, color: "#FF3B30", opacity: 0.7, marginTop: 4 },
+  emergencyBtnSheet: { borderWidth: 1.5, borderRadius: 14, paddingVertical: 14,
+                       alignItems: "center", marginTop: 10 },
+  emergencyBtnSheetText: { fontSize: 14, fontWeight: "700", color: "#FF3B30" },
   debugPanel:      { padding: 12, borderTopWidth: 1 },
   debugTitle:      { fontSize: 11, fontWeight: "700", marginBottom: 6 },
   debugAction:     { fontSize: 12, fontWeight: "600", marginBottom: 4 },
