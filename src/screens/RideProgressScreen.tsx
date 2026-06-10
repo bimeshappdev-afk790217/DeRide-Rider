@@ -20,7 +20,7 @@ const MATCHING_HTTP = "http://157.230.59.42:3000";
 const MATCHING_WS   = "ws://157.230.59.42:3000";
 const AVAIL_ABI     = ["function isOnline(address) external view returns (bool)"];
 const ESCROW_ABI    = [
-  "function createRide(bytes32,address,address,bytes32,uint256) external payable",
+  "function createRide(bytes32,address,address,bytes32,uint256,uint8) external payable",
   "function confirmPickupByRider(bytes32) external",
   "function confirmRide(bytes32,bytes32) external",
   "function disputeRide(bytes32,bytes32) external",
