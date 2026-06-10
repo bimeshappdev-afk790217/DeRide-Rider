@@ -70,8 +70,8 @@ beforeEach(() => {
   );
 });
 
-// ── Profile-001 ───────────────────────────────────────────────────────────────
-test('Profile-001: Shows truncated wallet address', async () => {
+// ── RA-P-001 ─────────────────────────────────────────────────────────────────
+test('RA-P-001: Shows truncated wallet address', async () => {
   const { queryByText } = await render(<ProfileScreen navigation={NAV} />);
   await waitFor(() => {
     // Address shown as ${addr.slice(0,10)}...${addr.slice(-6)}
@@ -79,24 +79,24 @@ test('Profile-001: Shows truncated wallet address', async () => {
   });
 });
 
-// ── Profile-002 ───────────────────────────────────────────────────────────────
-test('Profile-002: Shows balance in POL', async () => {
+// ── RA-P-002 ─────────────────────────────────────────────────────────────────
+test('RA-P-002: Shows balance in POL', async () => {
   const { queryByText } = await render(<ProfileScreen navigation={NAV} />);
   await waitFor(() => {
     expect(queryByText(/2\.0000 POL/)).toBeTruthy();
   });
 });
 
-// ── Profile-003 ───────────────────────────────────────────────────────────────
-test('Profile-003: Shows rider name', async () => {
+// ── RA-P-003 ─────────────────────────────────────────────────────────────────
+test('RA-P-003: Shows rider name', async () => {
   const { queryByText } = await render(<ProfileScreen navigation={NAV} />);
   await waitFor(() => {
     expect(queryByText('Alice')).toBeTruthy();
   });
 });
 
-// ── Profile-004 ───────────────────────────────────────────────────────────────
-test('Profile-004: Shows total rides count', async () => {
+// ── RA-P-004 ─────────────────────────────────────────────────────────────────
+test('RA-P-004: Shows total rides count', async () => {
   const { queryByText } = await render(<ProfileScreen navigation={NAV} />);
   await waitFor(() => {
     expect(queryByText('5')).toBeTruthy();

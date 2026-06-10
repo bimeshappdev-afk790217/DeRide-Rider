@@ -319,6 +319,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         arbitrator,
         pinHash,
         etaSeconds,
+        offerMultiplier,
         { value: BigInt(fareWei) }
       );
       console.log("[ESCROW] createRide tx:", tx.hash);

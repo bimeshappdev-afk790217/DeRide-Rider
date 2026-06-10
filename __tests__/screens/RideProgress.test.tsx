@@ -207,24 +207,35 @@ async function renderPendingConfirmation(routeOverrides: any = {}) {
 // ══════════════════════════════════════════════════════════════════
 
 // ── RA-B-001 ─────────────────────────────────────────────────────────────────
-test('RA-B-001: Standard offer (100×) navigates to RideProgress', async () => {
-  const params = makeRoute({ offerMultiplier: 100 });
-  const { queryByText } = await render(
-    <RideProgressScreen route={{ params }} navigation={NAV} />
-  );
-  await act(async () => { await new Promise(r => setTimeout(r, 200)); });
-  // RideProgress renders immediately — just verify it doesn't crash
-  expect(queryByText(/Dayton Mall/) || queryByText(/6\.5/)).toBeTruthy();
+test('RA-B-001: Standard offer (100×) → createRide called with offerMultiplier=100', async () => {
+  await renderWaitingPickup({ offerMultiplier: 100 });
+  await waitFor(() => {
+    expect(mockContract.createRide).toHaveBeenCalledWith(
+      expect.any(String),           // rideId
+      DRIVER_ADDR,                  // driverWallet
+      '0x' + 'e'.repeat(40),       // arbitrator (nodeAddress)
+      expect.any(String),           // pinHash
+      expect.any(BigInt),           // etaSeconds
+      100,                          // offerMultiplier ← key assertion
+      expect.objectContaining({ value: expect.any(BigInt) })
+    );
+  });
 });
 
 // ── RA-B-002 ─────────────────────────────────────────────────────────────────
-test('RA-B-002: Emergency offer (200×) shows correct fare', async () => {
-  const params = makeRoute({ offerMultiplier: 200, driver: makeDriver({ fareUSD: 10.00 }) });
-  const { queryByText } = await render(
-    <RideProgressScreen route={{ params }} navigation={NAV} />
-  );
-  await act(async () => { await new Promise(r => setTimeout(r, 200)); });
-  expect(queryByText(/10|6\.5/)).toBeTruthy();
+test('RA-B-002: Rush offer (200×) → createRide called with offerMultiplier=200', async () => {
+  await renderWaitingPickup({ offerMultiplier: 200 });
+  await waitFor(() => {
+    expect(mockContract.createRide).toHaveBeenCalledWith(
+      expect.any(String),
+      DRIVER_ADDR,
+      '0x' + 'e'.repeat(40),
+      expect.any(String),
+      expect.any(BigInt),
+      200,                          // offerMultiplier ← key assertion
+      expect.objectContaining({ value: expect.any(BigInt) })
+    );
+  });
 });
 
 // ── RA-B-003 ─────────────────────────────────────────────────────────────────
@@ -292,49 +303,61 @@ test('RA-B-008: Shows PIN display after escrow created', async () => {
 // ══════════════════════════════════════════════════════════════════
 
 // ── RA-C-001 ─────────────────────────────────────────────────────────────────
-test('RA-C-001: Driver late → shows Cancel (Full Refund) button', async () => {
-  // etaMinutes must be > originalEtaMins * 3
-  // driver.eta = 5, so we need etaMinutes > 15
-  // Simulate WS DRIVER_LOCATION with far distance (etaMins = 20)
-  const params = makeRoute({ driver: makeDriver({ eta: 5 }) });
+test('RA-C-001: Driver late 3× ETA → shows "Driver is running late" and penalty-free cancel', async () => {
+  const alertSpy = jest.spyOn(Alert, 'alert');
+
+  // Track the WS instance created for RIDER_JOIN (opened after rideId is set)
+  let lastWs: any = null;
+  const OrigWS = (global as any).WebSocket;
+  class TrackingWS extends OrigWS {
+    constructor(url: string) { super(url); lastWs = this; }
+  }
+  (global as any).WebSocket = TrackingWS;
+
+  // driver.eta = 5 → originalEtaMins = 5; driverLate when etaMinutes > 15
   const { queryByText } = await render(
-    <RideProgressScreen route={{ params }} navigation={NAV} />
+    <RideProgressScreen route={{ params: makeRoute({ driver: makeDriver({ eta: 5 }) }) }} navigation={NAV} />
   );
 
-  // Wait for waiting_pickup state
   await waitFor(() => {
     expect(queryByText(/Driver is on the way/i)).toBeTruthy();
   }, { timeout: 5000 });
 
-  // Simulate a WebSocket message with driver location far away (20 min ETA)
-  // Find the WS and send a message
-  const wsInstances = (global as any).WebSocket;
-  // Since we can't easily get the WS instance, we test that the cancel button appears
-  // when etaMinutes > originalEtaMins * 3. The WS sends location updates.
-  // We need to trigger the onmessage. Let's find the last created WS.
+  (global as any).WebSocket = OrigWS;
 
-  // Actually the WS is created inside useEffect after rideId is set.
-  // Let's just verify the "Cancel (Full Refund)" is shown when driverLate condition is true.
-  // We can achieve this by finding the last WS created after render and sending a message.
-  // Since global.WebSocket is our MockWebSocket class, we need to track instances.
+  // Inject DRIVER_LOCATION far from pickup (39.7589, -84.1916) → etaMins ≈ 165 > 15 → late
+  if (lastWs) {
+    await act(async () => {
+      lastWs.simulateMessage({ type: 'DRIVER_LOCATION', lat: 40.5, lng: -84.2 });
+    });
+    await act(async () => { await new Promise(r => setTimeout(r, 100)); });
+  }
 
-  // Simpler approach: check the conditional — it appears when etaMinutes > originalEtaMins * 3
-  // originalEtaMins = driver.eta = 5, so etaMinutes > 15 triggers it.
-  // etaMinutes is set by WS DRIVER_LOCATION message.
-  // The component starts with etaMinutes = driver.eta = 5.
-  // 5 > 5*3=15 → false. So "Cancel (Full Refund)" won't show initially.
-  // We need to simulate a WS message that sets etaMinutes to 20.
+  // Assert late-driver UI appears
+  await waitFor(() => {
+    expect(queryByText('Driver is running late')).toBeTruthy();
+    expect(queryByText('Cancel (Full Refund)')).toBeTruthy();
+  }, { timeout: 3000 });
 
-  // This test is simplified — we verify the button appears when state is triggered.
-  // Since we can't easily inject WS messages in this test setup, we verify the
-  // driverLate condition text appears when we have a late ETA from WS.
-
-  // Skip direct WS injection test and just verify the UI renders without crash.
-  expect(queryByText(/Driver is on the way/i)).toBeTruthy();
+  // Press cancel → alert shown → confirm → cancelRide called
+  await act(async () => { fireEvent.press(queryByText('Cancel (Full Refund)')!); });
+  await waitFor(() => {
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Cancel Ride (Driver Late)',
+      expect.any(String),
+      expect.any(Array)
+    );
+  });
+  const alertCall = alertSpy.mock.calls.find((c: any[]) => c[0] === 'Cancel Ride (Driver Late)');
+  const cancelBtn = (alertCall![2] as any[]).find((b: any) => b.text === 'Cancel Ride');
+  await act(async () => { cancelBtn?.onPress?.(); });
+  await waitFor(() => {
+    expect(mockContract.cancelRide).toHaveBeenCalled();
+  });
 });
 
-// ── RA-C-002 ─────────────────────────────────────────────────────────────────
-test('RA-C-002: RA-C: Showing "I\'m in the car" button in waiting_pickup state', async () => {
+// ── RA-B-009 ─────────────────────────────────────────────────────────────────
+test('RA-B-009: Waiting pickup state shows pickup confirmation button', async () => {
   const { queryByText } = await renderWaitingPickup();
   await waitFor(() => {
     expect(queryByText(/I'm in the car/i)).toBeTruthy();
