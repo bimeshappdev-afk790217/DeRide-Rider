@@ -1,6 +1,6 @@
 /**
  * RA-H: Home Screen Tests (9 tests)
- * RA-DS: Driver Search Tests (10 tests)
+ * RA-DS: Driver Search Tests (12 tests)
  * RA-O: Offer Selection Tests (10 tests)
  */
 import React from 'react';
@@ -487,7 +487,9 @@ test('RA-H-009: Recent destinations shown when search empty', async () => {
 // ══════════════════════════════════════════════════════════════════
 
 // ── RA-DS-001 ─────────────────────────────────────────────────────────────────
-test('RA-DS-001: No drivers → shows empty state + retry', async () => {
+test('RA-DS-001: No drivers anywhere → shows empty state + retry', async () => {
+  // Explicitly empty both server AND blockchain — tests the true "nobody anywhere" case
+  mockContract.getAvailableDrivers.mockResolvedValue([]);
   const { queryByText } = await renderAndSearch([]);
   await waitFor(() => {
     expect(queryByText(/No drivers available nearby/i)).toBeTruthy();
@@ -756,4 +758,102 @@ test('RA-O-010: Fare amounts calculated correctly at $3.25 base', async () => {
     // Emergency 2×: $6.50
     expect(result.queryByText(/\$6\.50/)).toBeTruthy();
   });
+});
+
+// ── RA-DS-011 ─────────────────────────────────────────────────────────────────
+test('RA-DS-011: Matching server unreachable → rider falls back to blockchain getAvailableDrivers', async () => {
+  (AsyncStorage.getItem as jest.Mock).mockImplementation((key: string) => {
+    if (key === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
+    if (key === 'recent_destinations') return Promise.resolve(JSON.stringify([
+      { name: 'Test Destination', address: 'Test Destination, Dayton, OH', lat: 39.79, lng: -84.22, savedAt: Date.now() },
+    ]));
+    return Promise.resolve(null);
+  });
+
+  // All matching-server URLs throw — simulates server unreachable (path A: .catch fires)
+  (global as any).fetch = jest.fn((url: string) => {
+    if (url.includes('nominatim.openstreetmap.org/reverse')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ address: { country_code: 'us' } }) });
+    }
+    if (url.includes('nominatim.openstreetmap.org/search')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    }
+    if (url.includes('router.project-osrm.org')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ routes: [] }) });
+    }
+    return Promise.reject(new Error('Network error: server unreachable'));
+  });
+
+  const blockchainDriver = {
+    wallet: '0xBlockchain1111111111111111111111111111111',
+    lat: 39760000,
+    lng: -84200000,
+    vehicle: 'Honda Civic Blockchain',
+    rating: 492,
+  };
+  mockContract.getAvailableDrivers.mockResolvedValue([blockchainDriver]);
+
+  const { queryByText } = await render(<HomeScreen navigation={NAV} />);
+  await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+  await act(async () => { fireEvent.press(queryByText('Test Destination')!); });
+  await act(async () => { await new Promise(r => setTimeout(r, 600)); });
+
+  // Blockchain fallback must have been consulted
+  expect(mockContract.getAvailableDrivers).toHaveBeenCalled();
+  // Blockchain driver renders in the UI
+  await waitFor(() => {
+    expect(queryByText(/Honda Civic Blockchain/i)).toBeTruthy();
+  }, { timeout: 4000 });
+});
+
+// ── RA-DS-012 ─────────────────────────────────────────────────────────────────
+test('RA-DS-012: Server returns empty drivers → rider falls back to blockchain getAvailableDrivers', async () => {
+  (AsyncStorage.getItem as jest.Mock).mockImplementation((key: string) => {
+    if (key === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
+    if (key === 'recent_destinations') return Promise.resolve(JSON.stringify([
+      { name: 'Test Destination', address: 'Test Destination, Dayton, OH', lat: 39.79, lng: -84.22, savedAt: Date.now() },
+    ]));
+    return Promise.resolve(null);
+  });
+
+  // Server responds but returns empty drivers array (path B: .then else branch fires)
+  (global as any).fetch = jest.fn((url: string) => {
+    if (url.includes('nominatim.openstreetmap.org/reverse')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ address: { country_code: 'us' } }) });
+    }
+    if (url.includes('nominatim.openstreetmap.org/search')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    }
+    if (url.includes('router.project-osrm.org')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ routes: [] }) });
+    }
+    if (url.includes('/riders/waiting')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }
+    if (url.includes('/riders/search')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ drivers: [] }) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  });
+
+  const blockchainDriver = {
+    wallet: '0xBlockchain2222222222222222222222222222222',
+    lat: 39760000,
+    lng: -84200000,
+    vehicle: 'Kia EV6 Blockchain',
+    rating: 488,
+  };
+  mockContract.getAvailableDrivers.mockResolvedValue([blockchainDriver]);
+
+  const { queryByText } = await render(<HomeScreen navigation={NAV} />);
+  await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+  await act(async () => { fireEvent.press(queryByText('Test Destination')!); });
+  await act(async () => { await new Promise(r => setTimeout(r, 600)); });
+
+  // Blockchain fallback must have been consulted
+  expect(mockContract.getAvailableDrivers).toHaveBeenCalled();
+  // Blockchain driver renders in the UI
+  await waitFor(() => {
+    expect(queryByText(/Kia EV6 Blockchain/i)).toBeTruthy();
+  }, { timeout: 4000 });
 });
