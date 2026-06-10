@@ -273,9 +273,16 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   };
 
   const confirmWithServer = async (riderWallet: string) => {
-    const driverAddr = driver.address?.length === 42
-      ? driver.address
-      : "0x240c737D8a2380cf161D66C2cce7512dEdF7Aa4e";
+    if (!driver.address || driver.address.length !== 42) {
+      Alert.alert(
+        "Invalid Driver",
+        "Driver address is invalid. Please search again.",
+        [{ text: "OK", onPress: () => navigation.goBack() }],
+      );
+      setStatus("failed");
+      return;
+    }
+    const driverAddr = driver.address;
 
     console.log("Calling /riders/confirm...");
     console.log("riderWallet:", riderWallet ? riderWallet.slice(0, 10) + "..." : "MISSING");

@@ -718,3 +718,20 @@ test('RA-RC-007: Dispute → shows dispute submitted screen', async () => {
     expect(queryByText('Dispute Submitted')).toBeTruthy();
   }, { timeout: 5000 });
 });
+
+// ── RA-B-011 ─────────────────────────────────────────────────────────────────
+test('RA-B-011: Malformed driver.address → Alert shown, createRide NOT called', async () => {
+  const alertSpy = jest.spyOn(Alert, 'alert');
+  const params = makeRoute({ driver: makeDriver({ address: '0xbad' }) });
+  await render(<RideProgressScreen route={{ params }} navigation={NAV} />);
+
+  await waitFor(() => {
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Invalid Driver',
+      expect.stringContaining('invalid'),
+      expect.any(Array),
+    );
+  }, { timeout: 5000 });
+
+  expect(mockContract.createRide).not.toHaveBeenCalled();
+});
