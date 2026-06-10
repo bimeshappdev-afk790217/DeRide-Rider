@@ -15,7 +15,9 @@ import { Colors, Typography, Spacing, Radius, Shadow } from "../theme";
 const ALCHEMY_URL         = process.env.EXPO_PUBLIC_ALCHEMY_URL                  ?? "";
 const DRIVER_AVAILABILITY = process.env.EXPO_PUBLIC_DRIVER_AVAILABILITY_ADDRESS  ?? "";
 const RIDE_ESCROW         = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS           ?? "";
-const NODE_REG_ADDR       = process.env.EXPO_PUBLIC_NODE_REGISTRY_ADDRESS         ?? "0xE8f8951cDcC4c6759A9E980b966D6742edcbAc59";
+const _NR_ENV = process.env.EXPO_PUBLIC_NODE_REGISTRY_ADDRESS;
+if (!_NR_ENV) console.warn("[NodeRegistry] EXPO_PUBLIC_NODE_REGISTRY_ADDRESS not set — node discovery will fail");
+const NODE_REG_ADDR = _NR_ENV ?? "";
 const AVAILABILITY_ABI    = [
   "function getAvailableDrivers() external view returns (tuple(address wallet, int256 lat, int256 lng, string vehicle, uint256 rating, uint256 lastSeen, bool available)[])",
 ];
