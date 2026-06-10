@@ -546,6 +546,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         driverAddr, riderWallet, privateKey,
         pickupLat, pickupLng, destLat, destLng,
         actualFareUSD,
+        offerMultiplier,
         newRideId,
       );
       console.log("[RELAY] Request posted, rideId:", newRideId.slice(0, 10), "— polling for acceptance...");

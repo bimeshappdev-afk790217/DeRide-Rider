@@ -17,15 +17,16 @@ export async function generateRideId(): Promise<string> {
 }
 
 export async function postRideRequest(
-  driverWallet: string,
-  riderWallet:  string,
-  privateKey:   string,
-  pickupLat:    number,
-  pickupLng:    number,
-  destLat:      number,
-  destLng:      number,
-  fareUSD:      number,
-  rideId?:      string,
+  driverWallet:    string,
+  riderWallet:     string,
+  privateKey:      string,
+  pickupLat:       number,
+  pickupLng:       number,
+  destLat:         number,
+  destLng:         number,
+  fareUSD:         number,
+  offerMultiplier: number,
+  rideId?:         string,
 ): Promise<string> {
   const provider = new ethers.JsonRpcProvider(ALCHEMY_URL);
   const signer   = new ethers.Wallet(privateKey, provider);
@@ -41,6 +42,7 @@ export async function postRideRequest(
     rider:     riderWallet,
     pickupLat, pickupLng, destLat, destLng,
     fareUSD,
+    offerMultiplier,
   });
 
   const nonce        = await provider.getTransactionCount(signer.address, "pending");

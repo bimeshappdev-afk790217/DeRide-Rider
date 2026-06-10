@@ -307,11 +307,11 @@ test('RA-B-008: Shows PIN display after escrow created', async () => {
 });
 
 // ── RA-B-010 ─────────────────────────────────────────────────────────────────
-test('RA-B-010: Relay fallback computes fareWei from live POL/USD price (not hardcoded 0.001 POL)', async () => {
+test('RA-B-010: Relay fallback sends correct fareWei and offerMultiplier for a non-standard offer', async () => {
   const POL_USD       = 0.5;
   const BASE_FARE_USD = 6.50; // driver.fareUSD from makeDriver
-  const MULTIPLIER    = 100;
-  const ACTUAL_FARE   = BASE_FARE_USD * MULTIPLIER / 100;
+  const MULTIPLIER    = 200;  // Emergency 2× — non-standard, exercises badge + penalty path
+  const ACTUAL_FARE   = BASE_FARE_USD * MULTIPLIER / 100; // = 13.00 USD
   const EXPECTED_WEI  = BigInt(Math.round((ACTUAL_FARE / POL_USD) * 1e18));
   const RELAY_RIDE_ID = '0x' + '01'.repeat(32); // deterministic from mocked generateRideId
 
@@ -342,6 +342,11 @@ test('RA-B-010: Relay fallback computes fareWei from live POL/USD price (not har
     // Wait for fallbackViaRelay to complete setup and register the interval
     await act(async () => { await new Promise(r => setTimeout(r, 300)); });
     expect(relayPollCallback).not.toBeNull();
+
+    // Assert offerMultiplier was included in the relay payload
+    const postArgs = (relayApi.postRideRequest as jest.Mock).mock.calls[0];
+    // signature: (driverWallet, riderWallet, privateKey, pickupLat, pickupLng, destLat, destLng, fareUSD, offerMultiplier, rideId)
+    expect(postArgs[8]).toBe(MULTIPLIER);
 
     // Manually fire one poll tick (driver accepted → createEscrowRide called)
     await act(async () => { await relayPollCallback!(); });
