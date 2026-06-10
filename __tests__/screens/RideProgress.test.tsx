@@ -1,5 +1,5 @@
 /**
- * RA-B: Booking Tests (8 tests)
+ * RA-B: Booking Tests (9 tests)
  * RA-C: Cancellation Tests (8 tests)
  * RA-RC: Ride Completion Tests (7 tests)
  */
@@ -59,7 +59,15 @@ jest.mock('ethers', () => {
   };
 });
 
+jest.mock('../../src/services/api', () => ({
+  postRideRequest:   jest.fn(() => Promise.resolve()),
+  pollForAcceptance: jest.fn(() => Promise.resolve(null)),
+  clearRelayMessage: jest.fn(() => Promise.resolve()),
+  generateRideId:    jest.fn(() => Promise.resolve('0x' + '01'.repeat(32))),
+}));
+
 import { RideProgressScreen } from '../../src/screens/RideProgressScreen';
+import * as relayApi from '../../src/services/api';
 
 const RIDER_ADDR = '0x' + 'a'.repeat(40);
 const DRIVER_ADDR = '0x' + 'b'.repeat(40);
@@ -296,6 +304,60 @@ test('RA-B-008: Shows PIN display after escrow created', async () => {
     // PIN is a 4-digit number shown on screen
     expect(queryByText(/Pickup PIN|show to driver/i)).toBeTruthy();
   });
+});
+
+// ── RA-B-010 ─────────────────────────────────────────────────────────────────
+test('RA-B-010: Relay fallback computes fareWei from live POL/USD price (not hardcoded 0.001 POL)', async () => {
+  const POL_USD       = 0.5;
+  const BASE_FARE_USD = 6.50; // driver.fareUSD from makeDriver
+  const MULTIPLIER    = 100;
+  const ACTUAL_FARE   = BASE_FARE_USD * MULTIPLIER / 100;
+  const EXPECTED_WEI  = BigInt(Math.round((ACTUAL_FARE / POL_USD) * 1e18));
+  const RELAY_RIDE_ID = '0x' + '01'.repeat(32); // deterministic from mocked generateRideId
+
+  // Server unreachable → triggers relay; CoinGecko succeeds → POL price available
+  (global as any).fetch = jest.fn((url: string) => {
+    if (url.includes('coingecko')) {
+      return Promise.resolve({ json: () => Promise.resolve({ 'matic-network': { usd: POL_USD } }) });
+    }
+    return Promise.reject(new Error('Server unreachable'));
+  });
+
+  (relayApi.pollForAcceptance as jest.Mock).mockResolvedValue({ rideId: RELAY_RIDE_ID });
+
+  // Intercept setInterval to capture the relay poll callback without waiting 3 s
+  const originalSetInterval = global.setInterval;
+  let relayPollCallback: (() => Promise<void>) | null = null;
+  const setIntervalSpy = jest.spyOn(global, 'setInterval').mockImplementation(
+    ((fn: any, delay: any) => {
+      if (delay === 3000) { relayPollCallback = fn; return 42 as any; }
+      return originalSetInterval(fn, delay);
+    }) as any
+  );
+
+  try {
+    const params = makeRoute({ offerMultiplier: MULTIPLIER });
+    await render(<RideProgressScreen route={{ params }} navigation={NAV} />);
+
+    // Wait for fallbackViaRelay to complete setup and register the interval
+    await act(async () => { await new Promise(r => setTimeout(r, 300)); });
+    expect(relayPollCallback).not.toBeNull();
+
+    // Manually fire one poll tick (driver accepted → createEscrowRide called)
+    await act(async () => { await relayPollCallback!(); });
+
+    await waitFor(() => {
+      expect(mockContract.createRide).toHaveBeenCalled();
+    }, { timeout: 5000 });
+
+    const args    = mockContract.createRide.mock.calls[0];
+    const options = args[args.length - 1] as { value: bigint };
+    expect(options.value).toBe(EXPECTED_WEI);
+    // Confirm old hardcode (0.001 POL) is gone
+    expect(options.value).not.toBe(BigInt('1000000000000000'));
+  } finally {
+    setIntervalSpy.mockRestore();
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════

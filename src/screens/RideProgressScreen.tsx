@@ -39,6 +39,32 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+const COINGECKO_POL_URL =
+  "https://api.coingecko.com/api/v3/simple/price?ids=matic-network&vs_currencies=usd";
+
+// Fetches live POL/USD price; falls back to AsyncStorage cache (up to 24 h).
+// Returns null only when no price is available at all — caller must abort.
+async function fetchPolPriceUsd(): Promise<number | null> {
+  try {
+    const res   = await fetch(COINGECKO_POL_URL);
+    const json  = await res.json();
+    const price = json["matic-network"]?.usd;
+    if (typeof price === "number" && price > 0) {
+      await AsyncStorage.setItem("pol_price_usd", String(price));
+      await AsyncStorage.setItem("pol_price_fetched_at", String(Date.now()));
+      return price;
+    }
+  } catch { /* fall through to cache */ }
+  try {
+    const cached   = await AsyncStorage.getItem("pol_price_usd");
+    const cachedAt = await AsyncStorage.getItem("pol_price_fetched_at");
+    if (cached && cachedAt && Date.now() - Number(cachedAt) < 86_400_000) {
+      return parseFloat(cached);
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 export const RideProgressScreen = ({ route, navigation }: any) => {
   const { colors } = useTheme();
   const _p = route.params;
@@ -496,6 +522,21 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       const riderWallet = riderWalletRef.current;
       if (!privateKey) { setStatus("failed"); return; }
 
+      // Compute the actual fare (base × multiplier) and convert to wei via live POL/USD.
+      // Fail fast before posting to the relay — no point broadcasting if we can't escrow.
+      const actualFareUSD = driver.fareUSD * offerMultiplier / 100;
+      const polPriceUsd   = await fetchPolPriceUsd();
+      if (polPriceUsd === null) {
+        Alert.alert(
+          "Price Unavailable",
+          "Cannot determine POL price for fare conversion. Please try again when connectivity is restored.",
+          [{ text: "OK", onPress: () => navigation.goBack() }],
+        );
+        setStatus("failed");
+        return;
+      }
+      const fareWei = BigInt(Math.round((actualFareUSD / polPriceUsd) * 1e18)).toString();
+
       // Generate rideId upfront so we can verify acceptance matches this exact ride
       const newRideId = await generateRideId();
       setRideId(newRideId); // set early so WS effect connects
@@ -504,7 +545,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       await postRideRequest(
         driverAddr, riderWallet, privateKey,
         pickupLat, pickupLng, destLat, destLng,
-        driver.fareUSD,
+        actualFareUSD,
         newRideId,
       );
       console.log("[RELAY] Request posted, rideId:", newRideId.slice(0, 10), "— polling for acceptance...");
@@ -546,9 +587,8 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
             return;
           }
 
-          const estimatedFareWei = "1000000000000000"; // 0.001 POL — hardcoded for testing
           const arbitrator = "0x240c737D8a2380cf161D66C2cce7512dEdF7Aa4e";
-          await createEscrowRide(newRideId, driverAddr, estimatedFareWei, arbitrator);
+          await createEscrowRide(newRideId, driverAddr, fareWei, arbitrator);
         }
       }, 3000);
 
