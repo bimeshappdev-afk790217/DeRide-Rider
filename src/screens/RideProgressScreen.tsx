@@ -15,6 +15,7 @@ import { WebRTCGPSAnswerer } from "../services/WebRTCGPS";
 
 const ESCROW_ADDR   = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS        ?? "0x31Fc72a2Fb4b3dbBE2c836225329247baA70D6F3";
 const DRIVER_AVAIL  = process.env.EXPO_PUBLIC_DRIVER_AVAILABILITY_ADDRESS ?? "0xf61943cBc76f5074ff314Fd348FD3990E34f157f";
+const ARBITRATOR    = process.env.EXPO_PUBLIC_ARBITRATOR_ADDRESS          ?? "0x240c737D8a2380cf161D66C2cce7512dEdF7Aa4e";
 const POLYGON_RPC   = "https://polygon-mainnet.g.alchemy.com/v2/Q25ZjjJ1haH3RxjFuVWuS";
 const MATCHING_HTTP = "http://157.230.59.42:3000";
 const MATCHING_WS   = "ws://157.230.59.42:3000";
@@ -588,8 +589,8 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
             return;
           }
 
-          const arbitrator = "0x240c737D8a2380cf161D66C2cce7512dEdF7Aa4e";
-          await createEscrowRide(newRideId, driverAddr, fareWei, arbitrator);
+          setFareUSD(actualFareUSD);
+          await createEscrowRide(newRideId, driverAddr, fareWei, ARBITRATOR);
         }
       }, 3000);
 

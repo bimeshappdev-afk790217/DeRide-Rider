@@ -307,13 +307,15 @@ test('RA-B-008: Shows PIN display after escrow created', async () => {
 });
 
 // ── RA-B-010 ─────────────────────────────────────────────────────────────────
-test('RA-B-010: Relay fallback sends correct fareWei and offerMultiplier for a non-standard offer', async () => {
-  const POL_USD       = 0.5;
-  const BASE_FARE_USD = 6.50; // driver.fareUSD from makeDriver
-  const MULTIPLIER    = 200;  // Emergency 2× — non-standard, exercises badge + penalty path
-  const ACTUAL_FARE   = BASE_FARE_USD * MULTIPLIER / 100; // = 13.00 USD
-  const EXPECTED_WEI  = BigInt(Math.round((ACTUAL_FARE / POL_USD) * 1e18));
-  const RELAY_RIDE_ID = '0x' + '01'.repeat(32); // deterministic from mocked generateRideId
+test('RA-B-010: Relay fallback: correct fareWei, offerMultiplier, fareUSD display, arbitrator from env', async () => {
+  const POL_USD           = 0.5;
+  const BASE_FARE_USD     = 6.50; // driver.fareUSD from makeDriver
+  const MULTIPLIER        = 200;  // Emergency 2× — non-standard, exercises badge + penalty path
+  const ACTUAL_FARE       = BASE_FARE_USD * MULTIPLIER / 100; // = 13.00 USD
+  const EXPECTED_WEI      = BigInt(Math.round((ACTUAL_FARE / POL_USD) * 1e18));
+  const RELAY_RIDE_ID     = '0x' + '01'.repeat(32); // deterministic from mocked generateRideId
+  // setup.ts sets this to '0x...0099' — distinct from the old hardcoded literal
+  const EXPECTED_ARB      = process.env.EXPO_PUBLIC_ARBITRATOR_ADDRESS!;
 
   // Server unreachable → triggers relay; CoinGecko succeeds → POL price available
   (global as any).fetch = jest.fn((url: string) => {
@@ -337,7 +339,7 @@ test('RA-B-010: Relay fallback sends correct fareWei and offerMultiplier for a n
 
   try {
     const params = makeRoute({ offerMultiplier: MULTIPLIER });
-    await render(<RideProgressScreen route={{ params }} navigation={NAV} />);
+    const { queryByText } = await render(<RideProgressScreen route={{ params }} navigation={NAV} />);
 
     // Wait for fallbackViaRelay to complete setup and register the interval
     await act(async () => { await new Promise(r => setTimeout(r, 300)); });
@@ -357,9 +359,21 @@ test('RA-B-010: Relay fallback sends correct fareWei and offerMultiplier for a n
 
     const args    = mockContract.createRide.mock.calls[0];
     const options = args[args.length - 1] as { value: bigint };
+
+    // fareWei: correct multiplied amount, not old 0.001 POL hardcode
     expect(options.value).toBe(EXPECTED_WEI);
-    // Confirm old hardcode (0.001 POL) is gone
     expect(options.value).not.toBe(BigInt('1000000000000000'));
+
+    // arbitrator: from EXPO_PUBLIC_ARBITRATOR_ADDRESS env var, not a hardcoded literal
+    // args: (rideId, driverWallet, arbitrator, pinHash, etaSeconds, offerMultiplier, { value })
+    expect(args[2]).toBe(EXPECTED_ARB);
+    expect(args[2]).not.toBe('0x240c737D8a2380cf161D66C2cce7512dEdF7Aa4e');
+
+    // fareUSD display: fare bar should show the multiplied fare ($13), not the base fare ($6.5)
+    await waitFor(() => {
+      expect(queryByText(`$${ACTUAL_FARE}`)).toBeTruthy();
+    }, { timeout: 3000 });
+
   } finally {
     setIntervalSpy.mockRestore();
   }
