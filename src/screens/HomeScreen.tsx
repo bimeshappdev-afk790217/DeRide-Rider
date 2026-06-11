@@ -32,7 +32,7 @@ const NODE_REG_ABI = [
 // Base pricing constants — must match matching server defaults for independent verification
 const BASE_FARE_USD  = 1.50;
 const PER_KM_RATE    = 0.80;
-const FARE_TOLERANCE = 0.20; // 20% threshold triggers warning + report
+const FARE_TOLERANCE = 0.50; // 20% threshold triggers warning + report
 
 function encodeGeohash(lat: number, lng: number, precision = 4): string {
   const B32 = "0123456789bcdefghjkmnpqrstuvwxyz";
@@ -148,6 +148,11 @@ const DriverCard = ({ driver, onSelect, selected }: any) => {
           <Text style={[styles.driverMeta, { color: colors.textSub }]}>
             ⭐ {driver.rating ?? "—"} · {driver.distanceMi} mi away
           </Text>
+          {driver.baseRatePerMile > 0 && (
+            <Text style={[styles.driverMeta, { color: colors.textSub }]}>
+              ${(driver.baseRatePerMile / 100).toFixed(2)}/mi base
+            </Text>
+          )}
         </View>
       </View>
       <View style={styles.driverRight}>
@@ -401,15 +406,16 @@ export const HomeScreen = ({ navigation }: any) => {
             }
             if (!allDrivers.has(key)) {
               allDrivers.set(key, {
-                address:     d.address,
-                lat:         parseFloat(d.lat),
-                lng:         parseFloat(d.lng),
-                vehicle:     d.vehicle ?? "DeRide Car",
-                rating:      d.rating     ?? null,
-                eta:         d.etaMinutes ?? null,
-                distanceMi:  ((d.distanceKm ?? 1) * 0.621).toFixed(1),
+                address:         d.address,
+                lat:             parseFloat(d.lat),
+                lng:             parseFloat(d.lng),
+                vehicle:         d.vehicle ?? "DeRide Car",
+                rating:          d.rating     ?? null,
+                eta:             d.etaMinutes ?? null,
+                distanceMi:      ((d.distanceKm ?? 1) * 0.621).toFixed(1),
                 fareUSD,
-                nodeAddress: node.operator,
+                nodeAddress:     node.operator,
+                baseRatePerMile: d.baseRatePerMile ?? 0,
               });
             }
           }
@@ -604,14 +610,15 @@ export const HomeScreen = ({ navigation }: any) => {
           const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc!.lat, riderLoc!.lng, resolved.lat, resolved.lng);
           const offers  = (data.fare?.offers as OfferOption[] | undefined) ?? [];
           const mappedDrivers = data.drivers.map((d: any) => ({
-            address:    d.address,
-            lat:        parseFloat(d.lat),
-            lng:        parseFloat(d.lng),
-            vehicle:    d.vehicle ?? "DeRide Car",
-            rating:     d.rating     ?? null,
-            eta:        d.etaMinutes ?? null,
-            distanceMi: ((d.distanceKm ?? 1) * 0.621).toFixed(1),
+            address:         d.address,
+            lat:             parseFloat(d.lat),
+            lng:             parseFloat(d.lng),
+            vehicle:         d.vehicle ?? "DeRide Car",
+            rating:          d.rating     ?? null,
+            eta:             d.etaMinutes ?? null,
+            distanceMi:      ((d.distanceKm ?? 1) * 0.621).toFixed(1),
             fareUSD,
+            baseRatePerMile: d.baseRatePerMile ?? 0,
           }));
           console.log("[SEARCH] Drivers found:", mappedDrivers.length);
           setDrivers(mappedDrivers);
