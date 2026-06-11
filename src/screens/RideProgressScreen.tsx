@@ -556,9 +556,16 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       const riderWallet = riderWalletRef.current;
       if (!privateKey) { setStatus("failed"); return; }
 
-      // Compute the actual fare (base × multiplier) and convert to wei via live POL/USD.
-      // Fail fast before posting to the relay — no point broadcasting if we can't escrow.
-      const actualFareUSD = driver.fareUSD * offerMultiplier / 100;
+      // Compute fare from the driver's on-chain session rate (BUG-16 fix).
+      // sessionRateCentsPerMile is the effective rate (base × ±50% adjustment) written
+      // to DriverAvailability.goOnline — it already includes the driver's adjustment.
+      // Falls back to fareUSD (server estimate) if the driver went online before the upgrade.
+      const sessionRate   = driver.sessionRateCentsPerMile ?? 0;
+      const tripDistKm    = haversineKm(pickupLat, pickupLng, destLat, destLng);
+      const tripDistMi    = tripDistKm * 0.621371;
+      const actualFareUSD = sessionRate > 0
+        ? Math.round((sessionRate / 100) * tripDistMi * (offerMultiplier / 100) * 100) / 100
+        : driver.fareUSD * offerMultiplier / 100; // pre-upgrade fallback
       const polPriceUsd   = await fetchPolPriceUsd();
       if (polPriceUsd === null) {
         Alert.alert(

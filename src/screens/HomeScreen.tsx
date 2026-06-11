@@ -19,7 +19,7 @@ const _NR_ENV = process.env.EXPO_PUBLIC_NODE_REGISTRY_ADDRESS;
 if (!_NR_ENV) console.warn("[NodeRegistry] EXPO_PUBLIC_NODE_REGISTRY_ADDRESS not set — node discovery will fail");
 const NODE_REG_ADDR = _NR_ENV ?? "";
 const AVAILABILITY_ABI    = [
-  "function getAvailableDrivers() external view returns (tuple(address wallet, int256 lat, int256 lng, string vehicle, uint256 rating, uint256 lastSeen, bool available)[])",
+  "function getAvailableDrivers() external view returns (tuple(address wallet, int256 lat, int256 lng, string vehicle, uint256 rating, uint256 lastSeen, bool available, uint32 sessionRateCentsPerMile)[])",
 ];
 const ESCROW_ABI = [
   "function hasActiveRide(address) external view returns (bool)",
@@ -406,16 +406,17 @@ export const HomeScreen = ({ navigation }: any) => {
             }
             if (!allDrivers.has(key)) {
               allDrivers.set(key, {
-                address:         d.address,
-                lat:             parseFloat(d.lat),
-                lng:             parseFloat(d.lng),
-                vehicle:         d.vehicle ?? "DeRide Car",
-                rating:          d.rating     ?? null,
-                eta:             d.etaMinutes ?? null,
-                distanceMi:      ((d.distanceKm ?? 1) * 0.621).toFixed(1),
+                address:                 d.address,
+                lat:                     parseFloat(d.lat),
+                lng:                     parseFloat(d.lng),
+                vehicle:                 d.vehicle ?? "DeRide Car",
+                rating:                  d.rating     ?? null,
+                eta:                     d.etaMinutes ?? null,
+                distanceMi:              ((d.distanceKm ?? 1) * 0.621).toFixed(1),
                 fareUSD,
-                nodeAddress:     node.operator,
-                baseRatePerMile: d.baseRatePerMile ?? 0,
+                nodeAddress:             node.operator,
+                baseRatePerMile:         d.baseRatePerMile ?? 0,
+                sessionRateCentsPerMile: 0, // server path: server computes fare at confirm time
               });
             }
           }
@@ -487,6 +488,10 @@ export const HomeScreen = ({ navigation }: any) => {
       console.log("[CONTRACT] Driver count:", raw.length);
       if (raw.length === 0) { setDrivers([]); return; }
       const escrow = new ethers.Contract(RIDE_ESCROW, ESCROW_ABI, provider);
+      // Trip distance (pickup → destination) is the same for all drivers
+      const tripDistKm = haversineKm(riderLoc!.lat, riderLoc!.lng, resolved.lat, resolved.lng);
+      const tripDistMi = tripDistKm * 0.621371;
+
       const mapped = (
         await Promise.all(
           raw.map(async (d: any) => {
@@ -497,15 +502,20 @@ export const HomeScreen = ({ navigation }: any) => {
             const dLat       = Number(d.lat) / 1e6;
             const dLng       = Number(d.lng) / 1e6;
             const distanceKm = haversineKm(riderLoc!.lat, riderLoc!.lng, dLat, dLng);
+            const sessionRate = Number(d.sessionRateCentsPerMile ?? 0);
+            const fareUSD = sessionRate > 0
+              ? Math.round((sessionRate / 100) * tripDistMi * 100) / 100
+              : 3.25; // fallback: driver went online before upgrade
             return {
-              address:    d.wallet,
-              lat:        dLat,
-              lng:        dLng,
-              vehicle:    d.vehicle || "DeRide Car",
-              rating:     Number(d.rating) / 100,
-              eta:        Math.max(1, Math.ceil(distanceKm / 0.5)),
-              distanceMi: (distanceKm * 0.621).toFixed(1),
-              fareUSD:    3.25,
+              address:                 d.wallet,
+              lat:                     dLat,
+              lng:                     dLng,
+              vehicle:                 d.vehicle || "DeRide Car",
+              rating:                  Number(d.rating) / 100,
+              eta:                     Math.max(1, Math.ceil(distanceKm / 0.5)),
+              distanceMi:              (distanceKm * 0.621).toFixed(1),
+              fareUSD,
+              sessionRateCentsPerMile: sessionRate,
             };
           })
         )
@@ -517,7 +527,8 @@ export const HomeScreen = ({ navigation }: any) => {
           wallet: d.address?.slice(0, 8), lat: d.lat, lng: d.lng, distanceMi: d.distanceMi,
         })));
       }
-      const baseFare = 3.25;
+      // Use the first available driver's base fare for the global offer tiers display
+      const baseFare = mapped.length > 0 ? (mapped[0] as any).fareUSD : 3.25;
       setFareOffers([
         { multiplier: 100, label: "Standard",       fareUSD: baseFare,           fareWei: "0" },
         { multiplier: 125, label: "Rush +25%",      fareUSD: baseFare * 1.25,    fareWei: "0" },
@@ -610,15 +621,16 @@ export const HomeScreen = ({ navigation }: any) => {
           const distKm  = data.fare?.distanceKm   ?? haversineKm(riderLoc!.lat, riderLoc!.lng, resolved.lat, resolved.lng);
           const offers  = (data.fare?.offers as OfferOption[] | undefined) ?? [];
           const mappedDrivers = data.drivers.map((d: any) => ({
-            address:         d.address,
-            lat:             parseFloat(d.lat),
-            lng:             parseFloat(d.lng),
-            vehicle:         d.vehicle ?? "DeRide Car",
-            rating:          d.rating     ?? null,
-            eta:             d.etaMinutes ?? null,
-            distanceMi:      ((d.distanceKm ?? 1) * 0.621).toFixed(1),
+            address:                 d.address,
+            lat:                     parseFloat(d.lat),
+            lng:                     parseFloat(d.lng),
+            vehicle:                 d.vehicle ?? "DeRide Car",
+            rating:                  d.rating     ?? null,
+            eta:                     d.etaMinutes ?? null,
+            distanceMi:              ((d.distanceKm ?? 1) * 0.621).toFixed(1),
             fareUSD,
-            baseRatePerMile: d.baseRatePerMile ?? 0,
+            baseRatePerMile:         d.baseRatePerMile ?? 0,
+            sessionRateCentsPerMile: 0, // server path: server computes fare at confirm time
           }));
           console.log("[SEARCH] Drivers found:", mappedDrivers.length);
           setDrivers(mappedDrivers);
