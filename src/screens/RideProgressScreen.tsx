@@ -101,7 +101,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   const [eta, setEta]                 = useState(driver.eta ?? 5);
   const [etaMinutes, setEtaMinutes]   = useState<number | null>(driver.eta ?? null);
   const originalEtaMins               = useRef<number>(driver.eta ?? 5);
-  const [driverLoc, setDriverLoc]     = useState({ lat: pickupLat + 0.005, lng: pickupLng + 0.005 });
+  const [driverLoc, setDriverLoc]     = useState<{ lat: number; lng: number } | null>(null);
   const [riderPos,  setRiderPos]      = useState({ lat: pickupLat, lng: pickupLng });
   const [elapsed, setElapsed]             = useState(0);
   const [actionLoading, setActionLoading] = useState(false);
@@ -218,7 +218,8 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         if (msg.type === "DRIVER_LOCATION") {
           setDriverLoc({ lat: msg.lat, lng: msg.lng });
           const distKm  = haversineKm(msg.lat, msg.lng, pickupLat, pickupLng);
-          const etaMins = Math.round((distKm / 30) * 60); // assume 30 km/h
+          // TODO: replace with routing API duration; 30 km/h assumption also affects late-penalty trigger in PolicyRegistry
+          const etaMins = Math.round((distKm / 30) * 60);
           setEtaMinutes(etaMins);
           setEta(etaMins);
         }
@@ -627,18 +628,28 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   return (
     <Animated.View style={[styles.container, { backgroundColor: colors.bg, opacity: fadeAnim }]}>
       <View style={styles.mapArea}>
+        {driverLoc === null && (
+          <View style={styles.mapWaiting}>
+            <Text style={styles.mapWaitingText}>Waiting for driver location...</Text>
+          </View>
+        )}
         <MapView
           style={StyleSheet.absoluteFillObject}
-          region={{
+          region={driverLoc !== null ? {
             latitude:       (riderPos.lat + driverLoc.lat) / 2,
             longitude:      (riderPos.lng + driverLoc.lng) / 2,
             latitudeDelta:  Math.abs(riderPos.lat - driverLoc.lat) * 3 + 0.01,
             longitudeDelta: Math.abs(riderPos.lng - driverLoc.lng) * 3 + 0.01,
+          } : {
+            latitude:       riderPos.lat,
+            longitude:      riderPos.lng,
+            latitudeDelta:  0.02,
+            longitudeDelta: 0.02,
           }}
         >
           <Marker coordinate={{ latitude: riderPos.lat, longitude: riderPos.lng }}
             title="You" pinColor="#007AFF" />
-          {(status === "driver_arriving" || status === "pending_confirmation") && (
+          {driverLoc !== null && (status === "driver_arriving" || status === "pending_confirmation") && (
             <Marker coordinate={{ latitude: driverLoc.lat, longitude: driverLoc.lng }}
               title="Driver" pinColor="#00E5A0" />
           )}
@@ -864,7 +875,11 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
 
 const styles = StyleSheet.create({
   container:   { flex: 1 },
-  mapArea:     { flex: 1 },
+  mapArea:        { flex: 1 },
+  mapWaiting:     { position: "absolute", zIndex: 1, top: 16, alignSelf: "center",
+                    backgroundColor: "rgba(0,0,0,0.6)", paddingHorizontal: 12,
+                    paddingVertical: 6, borderRadius: 8 },
+  mapWaitingText: { color: "#fff", fontSize: 12 },
   sheet:       { borderTopLeftRadius: 24, borderTopRightRadius: 24,
                  borderWidth: 1, borderBottomWidth: 0, padding: 24, paddingBottom: 40 },
   statusRow:   { flexDirection: "row", alignItems: "center", gap: 16, marginBottom: 20 },

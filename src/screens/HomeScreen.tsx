@@ -146,13 +146,15 @@ const DriverCard = ({ driver, onSelect, selected }: any) => {
         <View>
           <Text style={[styles.driverVehicle, { color: colors.text }]}>{driver.vehicle}</Text>
           <Text style={[styles.driverMeta, { color: colors.textSub }]}>
-            ⭐ {driver.rating} · {driver.distanceMi} mi away
+            ⭐ {driver.rating ?? "—"} · {driver.distanceMi} mi away
           </Text>
         </View>
       </View>
       <View style={styles.driverRight}>
         <Text style={[styles.driverFare, { color: Colors.brand }]}>${driver.fareUSD}</Text>
-        <Text style={[styles.driverEta, { color: colors.textSub }]}>{driver.eta} min</Text>
+        <Text style={[styles.driverEta, { color: colors.textSub }]}>
+          {driver.eta != null ? `${driver.eta} min` : "—"}
+        </Text>
       </View>
     </TouchableOpacity>
   );
@@ -396,8 +398,8 @@ export const HomeScreen = ({ navigation }: any) => {
                 lat:         parseFloat(d.lat),
                 lng:         parseFloat(d.lng),
                 vehicle:     d.vehicle ?? "DeRide Car",
-                rating:      d.rating  ?? 4.8,
-                eta:         d.etaMinutes ?? 3,
+                rating:      d.rating     ?? null,
+                eta:         d.etaMinutes ?? null,
                 distanceMi:  ((d.distanceKm ?? 1) * 0.621).toFixed(1),
                 fareUSD,
                 nodeAddress: node.operator,
@@ -590,8 +592,8 @@ export const HomeScreen = ({ navigation }: any) => {
             lat:        parseFloat(d.lat),
             lng:        parseFloat(d.lng),
             vehicle:    d.vehicle ?? "DeRide Car",
-            rating:     d.rating  ?? 4.8,
-            eta:        d.etaMinutes ?? 3,
+            rating:     d.rating     ?? null,
+            eta:        d.etaMinutes ?? null,
             distanceMi: ((d.distanceKm ?? 1) * 0.621).toFixed(1),
             fareUSD,
           }));
