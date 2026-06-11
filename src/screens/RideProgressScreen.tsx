@@ -11,6 +11,7 @@ import { ethers } from "ethers";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 import { postRideRequest, pollForAcceptance, clearRelayMessage, generateRideId } from "../services/api";
+import { getPolUsdFromOracle } from "../services/chainlinkOracle";
 import { WebRTCGPSAnswerer } from "../services/WebRTCGPS";
 
 const _ESCROW_ENV = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS;
@@ -45,31 +46,6 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-const COINGECKO_POL_URL =
-  "https://api.coingecko.com/api/v3/simple/price?ids=matic-network&vs_currencies=usd";
-
-// Fetches live POL/USD price; falls back to AsyncStorage cache (up to 24 h).
-// Returns null only when no price is available at all — caller must abort.
-async function fetchPolPriceUsd(): Promise<number | null> {
-  try {
-    const res   = await fetch(COINGECKO_POL_URL);
-    const json  = await res.json();
-    const price = json["matic-network"]?.usd;
-    if (typeof price === "number" && price > 0) {
-      await AsyncStorage.setItem("pol_price_usd", String(price));
-      await AsyncStorage.setItem("pol_price_fetched_at", String(Date.now()));
-      return price;
-    }
-  } catch { /* fall through to cache */ }
-  try {
-    const cached   = await AsyncStorage.getItem("pol_price_usd");
-    const cachedAt = await AsyncStorage.getItem("pol_price_fetched_at");
-    if (cached && cachedAt && Date.now() - Number(cachedAt) < 86_400_000) {
-      return parseFloat(cached);
-    }
-  } catch { /* ignore */ }
-  return null;
-}
 
 export const RideProgressScreen = ({ route, navigation }: any) => {
   const { colors } = useTheme();
@@ -566,16 +542,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       const actualFareUSD = sessionRate > 0
         ? Math.round((sessionRate / 100) * tripDistMi * (offerMultiplier / 100) * 100) / 100
         : driver.fareUSD * offerMultiplier / 100; // pre-upgrade fallback
-      const polPriceUsd   = await fetchPolPriceUsd();
-      if (polPriceUsd === null) {
-        Alert.alert(
-          "Price Unavailable",
-          "Cannot determine POL price for fare conversion. Please try again when connectivity is restored.",
-          [{ text: "OK", onPress: () => navigation.goBack() }],
-        );
-        setStatus("failed");
-        return;
-      }
+      const polPriceUsd = await getPolUsdFromOracle();
       const fareWei = BigInt(Math.round((actualFareUSD / polPriceUsd) * 1e18)).toString();
 
       // Generate rideId upfront so we can verify acceptance matches this exact ride

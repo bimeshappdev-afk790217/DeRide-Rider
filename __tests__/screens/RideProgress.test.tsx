@@ -66,6 +66,10 @@ jest.mock('../../src/services/api', () => ({
   generateRideId:    jest.fn(() => Promise.resolve('0x' + '01'.repeat(32))),
 }));
 
+jest.mock('../../src/services/chainlinkOracle', () => ({
+  getPolUsdFromOracle: jest.fn(() => Promise.resolve(0.5)),
+}));
+
 import { RideProgressScreen } from '../../src/screens/RideProgressScreen';
 import * as relayApi from '../../src/services/api';
 
@@ -319,13 +323,10 @@ test('RA-B-010: Relay fallback: correct fareWei, offerMultiplier, fareUSD displa
   // nodeAddress comes from route params (captured from /riders/search nodeAddress field)
   const EXPECTED_NODE     = NODE_ADDR;
 
-  // Server unreachable → triggers relay; CoinGecko succeeds → POL price available
-  (global as any).fetch = jest.fn((url: string) => {
-    if (url.includes('coingecko')) {
-      return Promise.resolve({ json: () => Promise.resolve({ 'matic-network': { usd: POL_USD } }) });
-    }
-    return Promise.reject(new Error('Server unreachable'));
-  });
+  // Server unreachable → triggers relay; oracle module mocked to return POL_USD
+  const oracleMod = require('../../src/services/chainlinkOracle');
+  (oracleMod.getPolUsdFromOracle as jest.Mock).mockResolvedValue(POL_USD);
+  (global as any).fetch = jest.fn(() => Promise.reject(new Error('Server unreachable')));
 
   (relayApi.pollForAcceptance as jest.Mock).mockResolvedValue({ rideId: RELAY_RIDE_ID });
 

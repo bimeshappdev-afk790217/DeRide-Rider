@@ -18,6 +18,13 @@ export const makeContractMock = (overrides: Record<string, jest.Mock> = {}) => {
   isOnline: jest.fn(() => Promise.resolve(true)),
   getNodes: jest.fn(() => Promise.resolve([])),
   reportFailure: jest.fn(() => Promise.resolve(mockTx)),
+  latestRoundData: jest.fn(() => Promise.resolve([
+    1n,
+    BigInt(50_000_000),  // $0.50 * 1e8
+    BigInt(Math.floor(Date.now() / 1000) - 60),
+    BigInt(Math.floor(Date.now() / 1000) - 60), // fresh
+    1n,
+  ])),
   hasMessage: jest.fn(() => Promise.resolve([false, false])),
   getMessage: jest.fn(() => Promise.resolve(['0x0', new Uint8Array(0), 0n])),
   clearMessage: jest.fn(() => Promise.resolve(mockTx)),
