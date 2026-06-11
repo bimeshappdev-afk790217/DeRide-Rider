@@ -336,6 +336,10 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
 
       const etaSeconds = BigInt(Math.round(originalEtaMins.current * 60));
+      // In the relay fallback (server down) there is no matching-server node, so
+      // nodeAddr arrives as "". Ethers v6 treats "" as an ENS name and throws
+      // "unconfigured name" on Polygon. Use ZeroAddress instead.
+      const safeNodeAddr = nodeAddr || ethers.ZeroAddress;
 
       let tx: any;
       if (committedFareWei && driverSig) {
@@ -343,7 +347,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         tx = await escrow["createRide(bytes32,address,address,bytes32,uint256,uint8,uint256,bytes)"](
           newRideId,
           driverWallet,
-          nodeAddr,
+          safeNodeAddr,
           pinHash,
           etaSeconds,
           offerMultiplier,
@@ -356,7 +360,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         tx = await escrow["createRide(bytes32,address,address,bytes32,uint256,uint8)"](
           newRideId,
           driverWallet,
-          nodeAddr,
+          safeNodeAddr,
           pinHash,
           etaSeconds,
           offerMultiplier,
