@@ -158,26 +158,31 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     if (!rideId || !riderWalletRef.current) return;
 
     if (isBlockchainFallback.current) {
-      // Matching server was unreachable — use WebRTC P2P relay
-      const privateKey  = privateKeyRef.current;
-      const riderWallet = riderWalletRef.current;
-      if (!privateKey || !riderWallet) return;
-
-      const answerer = new WebRTCGPSAnswerer();
-      answerer.onGPSUpdate = (lat, lng) => {
-        setDriverLoc({ lat, lng });
-        const distKm  = haversineKm(lat, lng, pickupLat, pickupLng);
-        const etaMins = Math.round((distKm / 30) * 60);
-        setEtaMinutes(etaMins);
-        setEta(etaMins);
-      };
-      answerer.onConnected    = () => setUsingWebRTC(true);
-      answerer.onDisconnected = () => setUsingWebRTC(false);
-      webRTCAnswererRef.current = answerer;
-
-      answerer.start(privateKey, riderWallet, rideId)
-        .catch((e: any) => console.warn("[WEBRTC] Answerer start failed:", e.message));
-
+      // Matching server was unreachable — attempt WebRTC P2P GPS relay.
+      // Wrapped in try/catch: if react-native-webrtc causes a native bridge abort
+      // in Expo Go (not catchable inside start()), this guard ensures the ride
+      // handshake (acceptance polling in fallbackViaRelay) is never disrupted.
+      try {
+        const privateKey  = privateKeyRef.current;
+        const riderWallet = riderWalletRef.current;
+        if (privateKey && riderWallet) {
+          const answerer = new WebRTCGPSAnswerer();
+          answerer.onGPSUpdate = (lat, lng) => {
+            setDriverLoc({ lat, lng });
+            const distKm  = haversineKm(lat, lng, pickupLat, pickupLng);
+            const etaMins = Math.round((distKm / 30) * 60);
+            setEtaMinutes(etaMins);
+            setEta(etaMins);
+          };
+          answerer.onConnected    = () => setUsingWebRTC(true);
+          answerer.onDisconnected = () => setUsingWebRTC(false);
+          webRTCAnswererRef.current = answerer;
+          answerer.start(privateKey, riderWallet, rideId)
+            .catch((e: any) => console.warn("[WEBRTC] Answerer start failed:", e.message));
+        }
+      } catch (e: any) {
+        console.warn("[WEBRTC] GPS relay setup failed — continuing without it:", e?.message ?? e);
+      }
       return () => {
         webRTCAnswererRef.current?.stop();
         webRTCAnswererRef.current = null;

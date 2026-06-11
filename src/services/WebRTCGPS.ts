@@ -39,14 +39,29 @@ export class WebRTCGPSAnswerer {
     riderWallet: string,
     rideId:      string,
   ): Promise<void> {
+    // Outer guard: if anything below escapes the inner try/catch (e.g. a native
+    // bridge abort from react-native-webrtc in Expo Go), we swallow it here so
+    // the Promise always resolves and never disrupts the ride handshake.
+    try {
+      await this._startInternal(privateKey, riderWallet, rideId);
+    } catch (e: any) {
+      console.warn("[WEBRTC] start() failed — GPS relay unavailable:", e?.message ?? e);
+    }
+  }
+
+  private async _startInternal(
+    privateKey:  string,
+    riderWallet: string,
+    rideId:      string,
+  ): Promise<void> {
     if (!ALCHEMY_URL || !MESSAGE_RELAY) {
       console.warn("[WEBRTC] ALCHEMY_URL or MESSAGE_RELAY not configured");
       return;
     }
 
     // Dynamic require — prevents native module from loading at startup in Expo Go.
-    // Must be scoped to start() so RTCPeerConnection/RTCSessionDescription are
-    // available to the setInterval closure below.
+    // Must be scoped to _startInternal() so RTCPeerConnection/RTCSessionDescription
+    // are available to the setInterval closure below.
     let RTCPeerConnection: any;
     let RTCSessionDescription: any;
     try {
@@ -54,11 +69,11 @@ export class WebRTCGPSAnswerer {
       RTCPeerConnection    = webrtc.RTCPeerConnection;
       RTCSessionDescription = webrtc.RTCSessionDescription;
     } catch {
-      console.warn("[WEBRTC] WebRTC not available in this environment — skipping GPS relay");
+      console.warn("[WEBRTC] react-native-webrtc unavailable — skipping GPS relay");
       return;
     }
     if (!RTCPeerConnection) {
-      console.warn("[WEBRTC] WebRTC not available in this environment — skipping GPS relay");
+      console.warn("[WEBRTC] RTCPeerConnection not found — skipping GPS relay");
       return;
     }
 
