@@ -25,6 +25,7 @@ export async function postRideRequest(
   destLat:         number,
   destLng:         number,
   fareUSD:         number,
+  fareWei:         string,
   offerMultiplier: number,
   rideId?:         string,
 ): Promise<string> {
@@ -42,6 +43,7 @@ export async function postRideRequest(
     rider:     riderWallet,
     pickupLat, pickupLng, destLat, destLng,
     fareUSD,
+    fareWei,
     offerMultiplier,
   });
 
@@ -69,7 +71,11 @@ export async function clearRelayMessage(privateKey: string): Promise<void> {
   }
 }
 
-export async function pollForAcceptance(myWallet: string, privateKey?: string): Promise<{ rideId: string } | null> {
+export async function pollForAcceptance(myWallet: string, privateKey?: string): Promise<{
+  rideId: string;
+  committedFareWei?: string;
+  driverSig?: string;
+} | null> {
   try {
     const provider = new ethers.JsonRpcProvider(ALCHEMY_URL);
     const relay    = new ethers.Contract(MESSAGE_RELAY, RELAY_ABI, provider);
@@ -87,7 +93,11 @@ export async function pollForAcceptance(myWallet: string, privateKey?: string): 
       if (privateKey) clearRelayMessage(privateKey);
       return null;
     }
-    return { rideId: msg.rideId };
+    return {
+      rideId:           msg.rideId,
+      committedFareWei: msg.committedFareWei,
+      driverSig:        msg.driverSig,
+    };
   } catch {
     return null;
   }

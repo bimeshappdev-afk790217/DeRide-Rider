@@ -1,9 +1,13 @@
 export const mockTx = { hash: '0xabc123', wait: jest.fn(() => Promise.resolve({ status: 1 })) };
 
-export const makeContractMock = (overrides: Record<string, jest.Mock> = {}) => ({
+export const makeContractMock = (overrides: Record<string, jest.Mock> = {}) => {
+  const createRideMock = jest.fn(() => Promise.resolve(mockTx));
+  return ({
   getBalance: jest.fn(() => Promise.resolve(BigInt('2000000000000000000'))),
   getRideStatus: jest.fn(() => Promise.resolve(0n)),
-  createRide: jest.fn(() => Promise.resolve(mockTx)),
+  createRide: createRideMock,
+  "createRide(bytes32,address,address,bytes32,uint256,uint8)": createRideMock,
+  "createRide(bytes32,address,address,bytes32,uint256,uint8,uint256,bytes)": createRideMock,
   confirmPickupByRider: jest.fn(() => Promise.resolve(mockTx)),
   confirmRide: jest.fn(() => Promise.resolve(mockTx)),
   disputeRide: jest.fn(() => Promise.resolve(mockTx)),
@@ -19,7 +23,8 @@ export const makeContractMock = (overrides: Record<string, jest.Mock> = {}) => (
   clearMessage: jest.fn(() => Promise.resolve(mockTx)),
   postMessage: jest.fn(() => Promise.resolve(mockTx)),
   ...overrides,
-});
+  });
+};
 
 export const makeProviderMock = (overrides: Record<string, jest.Mock> = {}) => ({
   getBalance: jest.fn(() => Promise.resolve(BigInt('2000000000000000000'))),

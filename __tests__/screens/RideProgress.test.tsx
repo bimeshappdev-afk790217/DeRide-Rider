@@ -349,8 +349,8 @@ test('RA-B-010: Relay fallback: correct fareWei, offerMultiplier, fareUSD displa
 
     // Assert offerMultiplier was included in the relay payload
     const postArgs = (relayApi.postRideRequest as jest.Mock).mock.calls[0];
-    // signature: (driverWallet, riderWallet, privateKey, pickupLat, pickupLng, destLat, destLng, fareUSD, offerMultiplier, rideId)
-    expect(postArgs[8]).toBe(MULTIPLIER);
+    // signature: (driverWallet, riderWallet, privateKey, pickupLat, pickupLng, destLat, destLng, fareUSD, fareWei, offerMultiplier, rideId)
+    expect(postArgs[9]).toBe(MULTIPLIER);
 
     // Manually fire one poll tick (driver accepted → createEscrowRide called)
     await act(async () => { await relayPollCallback!(); });

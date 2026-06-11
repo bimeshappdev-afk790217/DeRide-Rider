@@ -26,6 +26,7 @@ const MATCHING_WS   = "ws://157.230.59.42:3000";
 const AVAIL_ABI     = ["function isOnline(address) external view returns (bool)"];
 const ESCROW_ABI    = [
   "function createRide(bytes32,address,address,bytes32,uint256,uint8) external payable",
+  "function createRide(bytes32,address,address,bytes32,uint256,uint8,uint256,bytes) external payable",
   "function confirmPickupByRider(bytes32) external",
   "function confirmRide(bytes32,bytes32) external",
   "function disputeRide(bytes32,bytes32) external",
@@ -333,10 +334,12 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   };
 
   const createEscrowRide = async (
-    newRideId:      string,
-    driverWallet:   string,
-    fareWei:        string,
-    nodeAddr:       string,
+    newRideId:        string,
+    driverWallet:     string,
+    fareWei:          string,
+    nodeAddr:         string,
+    committedFareWei?: string,
+    driverSig?:        string,
   ) => {
     setStatus("creating_escrow");
     try {
@@ -352,16 +355,33 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
 
       const etaSeconds = BigInt(Math.round(originalEtaMins.current * 60));
-      console.log("[ESCROW] createRide:", newRideId.slice(0,10), "fareWei:", fareWei, "PIN:", newPin, "etaSecs:", etaSeconds.toString());
-      const tx = await escrow.createRide(
-        newRideId,
-        driverWallet,
-        nodeAddr,
-        pinHash,
-        etaSeconds,
-        offerMultiplier,
-        { value: BigInt(fareWei) }
-      );
+
+      let tx: any;
+      if (committedFareWei && driverSig) {
+        console.log("[ESCROW] createRide (signed):", newRideId.slice(0,10), "committedFareWei:", committedFareWei);
+        tx = await escrow["createRide(bytes32,address,address,bytes32,uint256,uint8,uint256,bytes)"](
+          newRideId,
+          driverWallet,
+          nodeAddr,
+          pinHash,
+          etaSeconds,
+          offerMultiplier,
+          BigInt(committedFareWei),
+          driverSig,
+          { value: BigInt(committedFareWei) },
+        );
+      } else {
+        console.log("[ESCROW] createRide (legacy):", newRideId.slice(0,10), "fareWei:", fareWei, "PIN:", newPin, "etaSecs:", etaSeconds.toString());
+        tx = await escrow["createRide(bytes32,address,address,bytes32,uint256,uint8)"](
+          newRideId,
+          driverWallet,
+          nodeAddr,
+          pinHash,
+          etaSeconds,
+          offerMultiplier,
+          { value: BigInt(fareWei) },
+        );
+      }
       console.log("[ESCROW] createRide tx:", tx.hash);
       await tx.wait();
       console.log("[ESCROW] createRide confirmed, PIN:", newPin);
@@ -560,6 +580,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         driverAddr, riderWallet, privateKey,
         pickupLat, pickupLng, destLat, destLng,
         actualFareUSD,
+        fareWei,
         offerMultiplier,
         newRideId,
       );
@@ -603,7 +624,10 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
           }
 
           setFareUSD(actualFareUSD);
-          await createEscrowRide(newRideId, driverAddr, fareWei, nodeAddress);
+          await createEscrowRide(
+            newRideId, driverAddr, fareWei, nodeAddress,
+            accepted.committedFareWei, accepted.driverSig,
+          );
         }
       }, 3000);
 
