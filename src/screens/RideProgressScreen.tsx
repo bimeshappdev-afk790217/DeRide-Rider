@@ -222,10 +222,12 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       console.log("Key loaded:", key ? "yes" : "MISSING");
       riderWalletRef.current = addr;
       privateKeyRef.current  = key;
-      // Clear any leftover relay messages before starting a new ride
+      // Await clearRelayMessage so its nonce is consumed before postRideRequest runs.
+      // Fire-and-forget caused a nonce race: both txs got the same nonce,
+      // postRideRequest was REPLACEMENT_UNDERPRICED vs the auto-priced clearMessage.
       if (key) {
         console.log("[RELAY] Clearing stale rider messages before new ride");
-        clearRelayMessage(key).catch(() => {});
+        await clearRelayMessage(key);
       }
       await confirmWithServer(addr);
     } catch (err: any) {

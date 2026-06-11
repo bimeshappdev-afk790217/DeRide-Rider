@@ -37,7 +37,7 @@ export async function postRideRequest(
     const randomBytes = await Crypto.getRandomBytesAsync(32);
     rideId = "0x" + Array.from(randomBytes).map(b => b.toString(16).padStart(2, "0")).join("");
   }
-  const msg    = JSON.stringify({
+  const msg = JSON.stringify({
     type: "RIDE_REQUEST",
     rideId,
     rider:     riderWallet,
@@ -47,13 +47,38 @@ export async function postRideRequest(
     offerMultiplier,
   });
 
-  const nonce        = await provider.getTransactionCount(signer.address, "pending");
-  const feeData      = await provider.getFeeData();
-  const maxFeePerGas = feeData.maxFeePerGas! * 130n / 100n;
+  // Retry up to 3 times on REPLACEMENT_UNDERPRICED, bumping gas 20 % each round.
+  // Base is 150 % of suggested maxFeePerGas (not 130 %) so the tx beats any same-
+  // nonce tx whose auto-pricing used the default 130 % multiplier.
+  let lastError: any;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const nonce   = await provider.getTransactionCount(signer.address, "pending");
+      const feeData = await provider.getFeeData();
+      const bump    = 150n + BigInt(attempt * 20); // 150 %, 170 %, 190 %
+      const maxFeePerGas         = feeData.maxFeePerGas!          * bump / 100n;
+      const maxPriorityFeePerGas = (feeData.maxPriorityFeePerGas ?? 30_000_000_000n) * bump / 100n;
 
-  const tx = await relay.postMessage(driverWallet, ethers.toUtf8Bytes(msg), { nonce, maxFeePerGas });
-  await tx.wait();
-  return rideId;
+      const tx = await relay.postMessage(
+        driverWallet,
+        ethers.toUtf8Bytes(msg),
+        { nonce, maxFeePerGas, maxPriorityFeePerGas },
+      );
+      await tx.wait();
+      return rideId;
+    } catch (e: any) {
+      lastError = e;
+      const isReplacement = e?.code === "REPLACEMENT_UNDERPRICED"
+        || (e?.message ?? "").toLowerCase().includes("replacement");
+      if (isReplacement && attempt < 2) {
+        console.warn(`[RELAY] REPLACEMENT_UNDERPRICED (attempt ${attempt + 1}) — bumping gas and retrying`);
+        await new Promise(r => setTimeout(r, 1500));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastError;
 }
 
 export async function clearRelayMessage(privateKey: string): Promise<void> {
@@ -61,9 +86,13 @@ export async function clearRelayMessage(privateKey: string): Promise<void> {
     const provider = new ethers.JsonRpcProvider(ALCHEMY_URL);
     const signer   = new ethers.Wallet(privateKey, provider);
     const relay    = new ethers.Contract(MESSAGE_RELAY, RELAY_ABI, signer);
-    const [exists] = await relay.hasMessage(await signer.getAddress());
-    if (!exists) return;
-    const tx = await relay.clearMessage({ gasLimit: 100_000 });
+    const [exists, expired] = await relay.hasMessage(await signer.getAddress());
+    // Skip if no message or already expired — avoids wasting a nonce on a no-op
+    // that would race postRideRequest for the same nonce slot.
+    if (!exists || expired) return;
+    const feeData      = await provider.getFeeData();
+    const maxFeePerGas = feeData.maxFeePerGas! * 150n / 100n;
+    const tx = await relay.clearMessage({ gasLimit: 100_000, maxFeePerGas });
     await tx.wait();
     console.log("[RELAY] clearMessage confirmed");
   } catch (e: any) {
