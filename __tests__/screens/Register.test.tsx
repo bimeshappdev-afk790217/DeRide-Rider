@@ -1,8 +1,9 @@
 /**
- * RA-W: Wallet Setup Tests (4 tests)
+ * RA-W: Wallet Setup Tests (6 tests)
  */
 import React from 'react';
-import { render, fireEvent, waitFor, act } from '@testing-library/react-native';
+import { render, fireEvent, waitFor, act, within } from '@testing-library/react-native';
+import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import { makeContractMock, makeProviderMock } from '../mocks/blockchain';
@@ -132,10 +133,12 @@ test('RA-W-003: Register saves private key in SecureStore', async () => {
 });
 
 // ── RA-W-004 ─────────────────────────────────────────────────────────────────
-test('RA-W-004: Sufficient balance calls onRegistered', async () => {
+// Sufficient balance still requires the backup confirmation step before
+// onRegistered is called — the key must be acknowledged first.
+test('RA-W-004: Sufficient balance calls onRegistered after backup confirmation', async () => {
   mockProvider.getBalance.mockResolvedValue(BigInt('20000000000000000')); // 0.02 POL
   const onRegistered = jest.fn();
-  const { getByPlaceholderText, getByText } = await render(
+  const { getByPlaceholderText, getByText, getByRole } = await render(
     <RegisterScreen onRegistered={onRegistered} />
   );
   await waitFor(() => getByPlaceholderText('Enter your first name'));
@@ -148,7 +151,72 @@ test('RA-W-004: Sufficient balance calls onRegistered', async () => {
     fireEvent.press(getByText(/Start Riding/i));
   });
 
+  // Now on the backup step — must acknowledge the key before continuing
+  await waitFor(() => getByRole('switch'));
+  await act(async () => {
+    fireEvent(getByRole('switch'), 'valueChange', true);
+  });
+  await act(async () => {
+    fireEvent.press(getByText('Continue'));
+  });
+
   await waitFor(() => {
     expect(onRegistered).toHaveBeenCalled();
+  });
+});
+
+// ── RA-W-005 ─────────────────────────────────────────────────────────────────
+test('RA-W-005: Backup step blocks Continue without confirmation', async () => {
+  jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  const { getByPlaceholderText, getByText } = await render(
+    <RegisterScreen onRegistered={jest.fn()} />
+  );
+  await waitFor(() => getByPlaceholderText('Enter your first name'));
+
+  await act(async () => {
+    fireEvent.changeText(getByPlaceholderText('Enter your first name'), 'Alice');
+    fireEvent.changeText(getByPlaceholderText('+1 (555) 000-0000'), '5551234567');
+  });
+  await act(async () => {
+    fireEvent.press(getByText(/Start Riding/i));
+  });
+
+  await waitFor(() => getByText('Continue'));
+  // Press Continue WITHOUT toggling the switch
+  await act(async () => {
+    fireEvent.press(getByText('Continue'));
+  });
+
+  expect(Alert.alert).toHaveBeenCalledWith('Back Up Your Key First', expect.any(String));
+});
+
+// ── RA-W-006 ─────────────────────────────────────────────────────────────────
+test('RA-W-006: Import Wallet mode shows private key input and recovers wallet', async () => {
+  mockProvider.getBalance.mockResolvedValue(0n); // no balance → fund step
+  const onRegistered = jest.fn();
+  const { getByPlaceholderText, getByText } = await render(
+    <RegisterScreen onRegistered={onRegistered} />
+  );
+  await waitFor(() => getByText(/Import Wallet/i));
+
+  await act(async () => {
+    fireEvent.press(getByText(/Import Wallet/i));
+  });
+
+  // Fill name + phone (required even on import)
+  await act(async () => {
+    fireEvent.changeText(getByPlaceholderText('Enter your first name'), 'Bob');
+    fireEvent.changeText(getByPlaceholderText('+1 (555) 000-0000'), '5559876543');
+    fireEvent.changeText(getByPlaceholderText('0x1a2b3c4d...'), '0x' + 'b'.repeat(64));
+  });
+  await act(async () => {
+    fireEvent.press(getByText(/Import & Recover/i));
+  });
+
+  await waitFor(() => {
+    expect(SecureStore.setItemAsync).toHaveBeenCalledWith(
+      'rider_wallet_key',
+      expect.stringMatching(/^0x/)
+    );
   });
 });
