@@ -260,11 +260,15 @@ export const HomeScreen = ({ navigation }: any) => {
     if (!riderLoc) return;
     if (input.length < 3) { setSuggestions([]); return; }
     try {
+      // viewbox biases Nominatim results toward the rider's location (~55 km box).
+      // lat/lon are ignored by Nominatim's search endpoint; viewbox is the correct param.
+      const d   = 0.5;
+      const box = `${riderLoc.lng - d},${riderLoc.lat - d},${riderLoc.lng + d},${riderLoc.lat + d}`;
       const resp = await fetch(
         `https://nominatim.openstreetmap.org/search?` +
         `q=${encodeURIComponent(input)}&format=json&limit=10&addressdetails=1` +
         `&countrycodes=${countryCode}` +
-        `&lat=${riderLoc.lat}&lon=${riderLoc.lng}`,
+        `&viewbox=${box}`,
         { headers: { "User-Agent": "DeRide/1.0" } }
       );
       const results: any[] = await resp.json();
@@ -284,11 +288,13 @@ export const HomeScreen = ({ navigation }: any) => {
   const searchNearbyCategory = useCallback(async (category: string) => {
     if (!riderLoc) return;
     try {
+      const d   = 0.5;
+      const box = `${riderLoc.lng - d},${riderLoc.lat - d},${riderLoc.lng + d},${riderLoc.lat + d}`;
       const resp = await fetch(
         `https://nominatim.openstreetmap.org/search?` +
         `q=${encodeURIComponent(category)}&format=json&limit=10&addressdetails=1` +
         `&countrycodes=${countryCode}` +
-        `&lat=${riderLoc.lat}&lon=${riderLoc.lng}`,
+        `&viewbox=${box}`,
         { headers: { "User-Agent": "DeRide/1.0" } }
       );
       const results: any[] = await resp.json();
