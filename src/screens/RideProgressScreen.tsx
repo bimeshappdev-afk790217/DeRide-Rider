@@ -13,9 +13,13 @@ import { Colors, Shadow } from "../theme";
 import { postRideRequest, pollForAcceptance, clearRelayMessage, generateRideId } from "../services/api";
 import { WebRTCGPSAnswerer } from "../services/WebRTCGPS";
 
-const ESCROW_ADDR   = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS        ?? "0x31Fc72a2Fb4b3dbBE2c836225329247baA70D6F3";
-const DRIVER_AVAIL  = process.env.EXPO_PUBLIC_DRIVER_AVAILABILITY_ADDRESS ?? "0xf61943cBc76f5074ff314Fd348FD3990E34f157f";
-const ARBITRATOR    = process.env.EXPO_PUBLIC_ARBITRATOR_ADDRESS          ?? "0x240c737D8a2380cf161D66C2cce7512dEdF7Aa4e";
+const _ESCROW_ENV = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS;
+if (!_ESCROW_ENV) console.error("[RideEscrow] EXPO_PUBLIC_RIDE_ESCROW_ADDRESS not set — escrow calls will fail");
+const ESCROW_ADDR   = _ESCROW_ENV ?? "";
+
+const _DA_ENV = process.env.EXPO_PUBLIC_DRIVER_AVAILABILITY_ADDRESS;
+if (!_DA_ENV) console.error("[DriverAvailability] EXPO_PUBLIC_DRIVER_AVAILABILITY_ADDRESS not set — driver online check will fail");
+const DRIVER_AVAIL  = _DA_ENV ?? "";
 const POLYGON_RPC   = "https://polygon-mainnet.g.alchemy.com/v2/Q25ZjjJ1haH3RxjFuVWuS";
 const MATCHING_HTTP = "http://157.230.59.42:3000";
 const MATCHING_WS   = "ws://157.230.59.42:3000";
@@ -69,13 +73,14 @@ async function fetchPolPriceUsd(): Promise<number | null> {
 export const RideProgressScreen = ({ route, navigation }: any) => {
   const { colors } = useTheme();
   const _p = route.params;
-  const driver         = _p.driver;
-  const destination    = _p.destination;
-  const pickupLat      = parseFloat(_p.pickupLat);
-  const pickupLng      = parseFloat(_p.pickupLng);
-  const destLat        = parseFloat(_p.destLat);
-  const destLng        = parseFloat(_p.destLng);
+  const driver          = _p.driver;
+  const destination     = _p.destination;
+  const pickupLat       = parseFloat(_p.pickupLat);
+  const pickupLng       = parseFloat(_p.pickupLng);
+  const destLat         = parseFloat(_p.destLat);
+  const destLng         = parseFloat(_p.destLng);
   const offerMultiplier: number = _p.offerMultiplier ?? 100;
+  const nodeAddress: string = _p.nodeAddress ?? "";
 
   type Status =
     | "confirming"          // calling /riders/confirm HTTP
@@ -316,7 +321,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       }
 
       setFareUSD(data.fareUSD);
-      await createEscrowRide(data.rideId, data.driverWallet, data.fareWei, data.arbitrator);
+      await createEscrowRide(data.rideId, data.driverWallet, data.fareWei, data.nodeAddress ?? nodeAddress);
 
     } catch {
       // Matching server unreachable — fall back to MessageRelay + WebRTC GPS
@@ -327,10 +332,10 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   };
 
   const createEscrowRide = async (
-    newRideId:    string,
-    driverWallet: string,
-    fareWei:      string,
-    arbitrator:   string,
+    newRideId:      string,
+    driverWallet:   string,
+    fareWei:        string,
+    nodeAddr:       string,
   ) => {
     setStatus("creating_escrow");
     try {
@@ -350,7 +355,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       const tx = await escrow.createRide(
         newRideId,
         driverWallet,
-        arbitrator,
+        nodeAddr,
         pinHash,
         etaSeconds,
         offerMultiplier,
@@ -597,7 +602,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
           }
 
           setFareUSD(actualFareUSD);
-          await createEscrowRide(newRideId, driverAddr, fareWei, ARBITRATOR);
+          await createEscrowRide(newRideId, driverAddr, fareWei, nodeAddress);
         }
       }, 3000);
 

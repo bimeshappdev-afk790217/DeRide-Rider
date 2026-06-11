@@ -635,6 +635,7 @@ export const HomeScreen = ({ navigation }: any) => {
         driver: selected, destination,
         pickupLat, pickupLng, destLat, destLng,
         offerMultiplier: selectedOffer,
+        nodeAddress: nodeAddressRef.current,
       });
     } catch (error: any) {
       console.error("Ride creation error:", error);

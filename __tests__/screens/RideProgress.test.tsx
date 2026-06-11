@@ -72,6 +72,7 @@ import * as relayApi from '../../src/services/api';
 const RIDER_ADDR = '0x' + 'a'.repeat(40);
 const DRIVER_ADDR = '0x' + 'b'.repeat(40);
 const RIDE_ID = '0x' + '1'.repeat(64);
+const NODE_ADDR = '0x' + 'e'.repeat(40); // matching node operator address
 
 const makeDriver = (overrides: any = {}) => ({
   address: DRIVER_ADDR,
@@ -90,6 +91,7 @@ const makeRoute = (overrides: any = {}) => ({
   destLat: '39.7900',
   destLng: '-84.2200',
   offerMultiplier: 100,
+  nodeAddress: NODE_ADDR,
   ...overrides,
 });
 
@@ -113,7 +115,7 @@ function setupConfirmSuccess(fareUSD = 6.50, rideId = RIDE_ID) {
           driverWallet: DRIVER_ADDR,
           fareWei: '5000000000000000',
           fareUSD,
-          arbitrator: '0x' + 'e'.repeat(40),
+          nodeAddress: NODE_ADDR,
         }),
       });
     }
@@ -221,7 +223,7 @@ test('RA-B-001: Standard offer (100×) → createRide called with offerMultiplie
     expect(mockContract.createRide).toHaveBeenCalledWith(
       expect.any(String),           // rideId
       DRIVER_ADDR,                  // driverWallet
-      '0x' + 'e'.repeat(40),       // arbitrator (nodeAddress)
+      NODE_ADDR,                    // nodeAddress (3rd param of createRide)
       expect.any(String),           // pinHash
       expect.any(BigInt),           // etaSeconds
       100,                          // offerMultiplier ← key assertion
@@ -314,8 +316,8 @@ test('RA-B-010: Relay fallback: correct fareWei, offerMultiplier, fareUSD displa
   const ACTUAL_FARE       = BASE_FARE_USD * MULTIPLIER / 100; // = 13.00 USD
   const EXPECTED_WEI      = BigInt(Math.round((ACTUAL_FARE / POL_USD) * 1e18));
   const RELAY_RIDE_ID     = '0x' + '01'.repeat(32); // deterministic from mocked generateRideId
-  // setup.ts sets this to '0x...0099' — distinct from the old hardcoded literal
-  const EXPECTED_ARB      = process.env.EXPO_PUBLIC_ARBITRATOR_ADDRESS!;
+  // nodeAddress comes from route params (captured from /riders/search nodeAddress field)
+  const EXPECTED_NODE     = NODE_ADDR;
 
   // Server unreachable → triggers relay; CoinGecko succeeds → POL price available
   (global as any).fetch = jest.fn((url: string) => {
@@ -364,9 +366,9 @@ test('RA-B-010: Relay fallback: correct fareWei, offerMultiplier, fareUSD displa
     expect(options.value).toBe(EXPECTED_WEI);
     expect(options.value).not.toBe(BigInt('1000000000000000'));
 
-    // arbitrator: from EXPO_PUBLIC_ARBITRATOR_ADDRESS env var, not a hardcoded literal
-    // args: (rideId, driverWallet, arbitrator, pinHash, etaSeconds, offerMultiplier, { value })
-    expect(args[2]).toBe(EXPECTED_ARB);
+    // nodeAddress: from route params (captured from /riders/search nodeAddress), not deployer literal
+    // args: (rideId, driverWallet, nodeAddress, pinHash, etaSeconds, offerMultiplier, { value })
+    expect(args[2]).toBe(EXPECTED_NODE);
     expect(args[2]).not.toBe('0x240c737D8a2380cf161D66C2cce7512dEdF7Aa4e');
 
     // fareUSD display: fare bar should show the multiplied fare ($13), not the base fare ($6.5)
