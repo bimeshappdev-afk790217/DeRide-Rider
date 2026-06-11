@@ -148,15 +148,16 @@ const DriverCard = ({ driver, onSelect, selected }: any) => {
           <Text style={[styles.driverMeta, { color: colors.textSub }]}>
             ⭐ {driver.rating ?? "—"} · {driver.distanceMi} mi away
           </Text>
-          {driver.baseRatePerMile > 0 && (
+          {driver.sessionRateCentsPerMile > 0 && (
             <Text style={[styles.driverMeta, { color: colors.textSub }]}>
-              ${(driver.baseRatePerMile / 100).toFixed(2)}/mi base
+              ${(driver.sessionRateCentsPerMile / 100).toFixed(2)}/mi
             </Text>
           )}
         </View>
       </View>
       <View style={styles.driverRight}>
-        <Text style={[styles.driverFare, { color: Colors.brand }]}>${driver.fareUSD}</Text>
+        <Text style={[styles.driverFareLbl, { color: colors.textSub }]}>Est. fare</Text>
+        <Text style={[styles.driverFare, { color: Colors.brand }]}>${(driver.fareUSD ?? 0).toFixed(2)}</Text>
         <Text style={[styles.driverEta, { color: colors.textSub }]}>
           {driver.eta != null ? `${driver.eta} min` : "—"}
         </Text>
@@ -977,7 +978,7 @@ export const HomeScreen = ({ navigation }: any) => {
                 key={i}
                 driver={driver}
                 selected={selected}
-                onSelect={d => { setSelected(d); setShowOfferSheet(true); }}
+                onSelect={(d: any) => { setSelected(d); setShowOfferSheet(true); }}
               />
             ))}
 
@@ -1145,6 +1146,7 @@ const styles = StyleSheet.create({
   driverVehicle:  { fontSize: 15, fontWeight: "600" },
   driverMeta:     { fontSize: 12, marginTop: 2 },
   driverRight:    { alignItems: "flex-end" },
+  driverFareLbl:  { fontSize: 10, fontWeight: "500", marginBottom: 1 },
   driverFare:     { fontSize: 18, fontWeight: "700" },
   driverEta:      { fontSize: 12, marginTop: 2 },
   confirmBtn:      { backgroundColor: "#00E5A0", padding: 20, borderRadius: 16, alignItems: "center", marginTop: 8 },
