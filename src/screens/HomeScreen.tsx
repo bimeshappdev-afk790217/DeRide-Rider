@@ -365,6 +365,7 @@ export const HomeScreen = ({ navigation }: any) => {
       let   combinedFareUSD = 0;
       let   combinedDistKm  = 0;
       let   anySucceeded    = false;
+      let   offersWereSet   = false;
 
       for (const node of sortedNodes) {
         const httpBase = (node.endpoint as string).replace(/^ws(s?):\/\//, "http$1://");
@@ -387,7 +388,7 @@ export const HomeScreen = ({ navigation }: any) => {
           const distKm   = data.fare?.distanceKm   ?? haversineKm(riderLoc!.lat, riderLoc!.lng, resolved.lat, resolved.lng);
           const offers   = (data.fare?.offers as OfferOption[] | undefined) ?? [];
           if (!combinedFareUSD) { combinedFareUSD = fareUSD; combinedDistKm = distKm; }
-          if (offers.length > 0) setFareOffers(offers);
+          if (offers.length > 0) { setFareOffers(offers); offersWereSet = true; }
 
           let phantomCount = 0;
           for (const d of data.drivers) {
@@ -446,6 +447,15 @@ export const HomeScreen = ({ navigation }: any) => {
         console.log("[SEARCH] Driver locations:", driverList.map(d => ({
           wallet: d.address?.slice(0, 8), lat: d.lat, lng: d.lng, distanceMi: d.distanceMi,
         })));
+      }
+      // Server doesn't return fare.offers — build tiers from the quoted fare
+      if (!offersWereSet && combinedFareUSD > 0) {
+        setFareOffers([
+          { multiplier: 100, label: "Standard",       fareUSD: combinedFareUSD,        fareWei: "0" },
+          { multiplier: 125, label: "Rush +25%",      fareUSD: combinedFareUSD * 1.25, fareWei: "0" },
+          { multiplier: 150, label: "Priority +50%",  fareUSD: combinedFareUSD * 1.5,  fareWei: "0" },
+          { multiplier: 200, label: "Emergency 2×",   fareUSD: combinedFareUSD * 2.0,  fareWei: "0" },
+        ]);
       }
       setDrivers(driverList);
       setSelectedOffer(100);
@@ -605,7 +615,17 @@ export const HomeScreen = ({ navigation }: any) => {
           }));
           console.log("[SEARCH] Drivers found:", mappedDrivers.length);
           setDrivers(mappedDrivers);
-          if (offers.length > 0) setFareOffers(offers);
+          // Server doesn't return fare.offers — build tiers from the quoted fare
+          if (offers.length > 0) {
+            setFareOffers(offers);
+          } else {
+            setFareOffers([
+              { multiplier: 100, label: "Standard",       fareUSD: fareUSD,        fareWei: "0" },
+              { multiplier: 125, label: "Rush +25%",      fareUSD: fareUSD * 1.25, fareWei: "0" },
+              { multiplier: 150, label: "Priority +50%",  fareUSD: fareUSD * 1.5,  fareWei: "0" },
+              { multiplier: 200, label: "Emergency 2×",   fareUSD: fareUSD * 2.0,  fareWei: "0" },
+            ]);
+          }
           setSelectedOffer(100);
           verifyNodeFare(fareUSD, distKm, data.nodeAddress ?? "");
         } else {
