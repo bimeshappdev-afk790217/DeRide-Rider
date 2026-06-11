@@ -86,10 +86,11 @@ export async function clearRelayMessage(privateKey: string): Promise<void> {
     const provider = new ethers.JsonRpcProvider(ALCHEMY_URL);
     const signer   = new ethers.Wallet(privateKey, provider);
     const relay    = new ethers.Contract(MESSAGE_RELAY, RELAY_ABI, signer);
-    const [exists, expired] = await relay.hasMessage(await signer.getAddress());
-    // Skip if no message or already expired — avoids wasting a nonce on a no-op
-    // that would race postRideRequest for the same nonce slot.
-    if (!exists || expired) return;
+    const [exists] = await relay.hasMessage(await signer.getAddress());
+    // Only skip if there is literally nothing in the slot (timestamp == 0).
+    // Expired messages still occupy the slot and should be cleared — the contract
+    // clearMessage() has no require checks, so this never reverts.
+    if (!exists) return;
     const feeData      = await provider.getFeeData();
     const maxFeePerGas = feeData.maxFeePerGas! * 150n / 100n;
     const tx = await relay.clearMessage({ gasLimit: 100_000, maxFeePerGas });
