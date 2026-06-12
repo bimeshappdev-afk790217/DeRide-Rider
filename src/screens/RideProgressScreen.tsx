@@ -68,7 +68,8 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     | "completed"             // rider confirmed ride
     | "disputed"              // rider raised dispute
     | "escalated"             // escalated to DAO after dispute
-    | "cancelled_by_driver"   // driver cancelled the active ride
+    | "cancelled_by_driver"   // driver cancelled the active ride (post-escrow)
+    | "declined_pre_escrow"   // driver declined the request before escrow was created
     | "failed";
 
   const [status, setStatus]           = useState<Status>("confirming");
@@ -612,6 +613,13 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
           }
           clearInterval(pollRef.interval!);
           pollRef.interval = null;
+
+          if (accepted.declined) {
+            console.log("[RELAY] Driver declined ride:", accepted.rideId.slice(0, 10));
+            setStatus("declined_pre_escrow");
+            return;
+          }
+
           console.log("[RELAY] Driver accepted:", accepted.rideId.slice(0, 10));
 
           // Check driver still reachable before spending gas
@@ -650,6 +658,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     disputed:              { emoji: "⚠️", title: "Dispute raised",               sub: "Awaiting verifier review" },
     escalated:             { emoji: "🏛", title: "Escalated to DAO",              sub: "DeRide DAO is reviewing" },
     cancelled_by_driver:   { emoji: "❌", title: "Driver cancelled",              sub: "Your refund is being processed" },
+    declined_pre_escrow:   { emoji: "🔄", title: "Driver Declined",               sub: "Finding you another driver..." },
     failed:                { emoji: "❌", title: "Something went wrong",          sub: "Please try again" },
   }[status];
 
@@ -889,6 +898,24 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
               <Text style={{ color: "#FF4444", fontSize: 20, fontWeight: "700" }}>Ride Cancelled</Text>
               <Text style={{ color: "#aaa", fontSize: 13, marginTop: 8, textAlign: "center" }}>
                 Your driver cancelled the ride. Your full fare plus the driver's cancellation penalty has been refunded to your wallet.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[{ padding: 20, borderRadius: 16, alignItems: "center", marginTop: 12,
+                backgroundColor: Colors.brand }]}
+              onPress={() => navigation.goBack()}
+            >
+              <Text style={[{ color: "#000", fontSize: 16, fontWeight: "700" }]}>Find Another Driver</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {status === "declined_pre_escrow" && (
+          <View>
+            <View style={[styles.successCard, { backgroundColor: "#0a0a1a", borderColor: "#6666FF" }]}>
+              <Text style={{ color: "#6666FF", fontSize: 20, fontWeight: "700" }}>Driver Declined</Text>
+              <Text style={{ color: "#aaa", fontSize: 13, marginTop: 8, textAlign: "center" }}>
+                The driver isn't available for this trip. No charge was made — find another driver and try again.
               </Text>
             </View>
             <TouchableOpacity

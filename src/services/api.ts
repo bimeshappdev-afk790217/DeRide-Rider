@@ -105,6 +105,7 @@ export async function pollForAcceptance(myWallet: string, privateKey?: string): 
   rideId: string;
   committedFareWei?: string;
   driverSig?: string;
+  declined?: boolean;
 } | null> {
   try {
     const provider = new ethers.JsonRpcProvider(ALCHEMY_URL);
@@ -119,6 +120,11 @@ export async function pollForAcceptance(myWallet: string, privateKey?: string): 
       return null;
     }
     const msg = JSON.parse(ethers.toUtf8String(dataBytes));
+    if (msg.type === "RIDE_DECLINED") {
+      console.log("[RELAY] Driver declined ride:", msg.rideId?.slice(0, 10));
+      if (privateKey) clearRelayMessage(privateKey);
+      return { rideId: msg.rideId, declined: true };
+    }
     if (msg.type !== "RIDE_ACCEPT") {
       if (privateKey) clearRelayMessage(privateKey);
       return null;

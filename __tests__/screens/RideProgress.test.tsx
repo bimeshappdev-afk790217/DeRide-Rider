@@ -738,3 +738,132 @@ test('RA-B-011: Malformed driver.address → Alert shown, createRide NOT called'
 
   expect(mockContract.createRide).not.toHaveBeenCalled();
 });
+
+// ─── BUG-43: Driver Decline Detection ─────────────────────────────────────────
+
+// ── RA-RP-021 ─────────────────────────────────────────────────────────────────
+test('RA-RP-021 (BUG-43): RIDE_DECLINED signal stops relay poll and shows "Driver Declined" — not timeout', async () => {
+  const RELAY_RIDE_ID = '0x' + '01'.repeat(32); // must match generateRideId mock
+
+  (global as any).fetch = jest.fn(() => Promise.reject(new Error('Network error')));
+
+  // Returned second tick: declined — first tick returns null
+  let callCount = 0;
+  (relayApi.pollForAcceptance as jest.Mock).mockImplementation(async () => {
+    callCount++;
+    if (callCount === 1) return null;
+    return { rideId: RELAY_RIDE_ID, declined: true };
+  });
+
+  const originalSetInterval = global.setInterval;
+  let relayPollCallback: (() => Promise<void>) | null = null;
+  const setIntervalSpy = jest.spyOn(global, 'setInterval').mockImplementation(
+    ((fn: any, delay: any) => {
+      if (delay === 3000) { relayPollCallback = fn; return 42 as any; }
+      return originalSetInterval(fn, delay);
+    }) as any
+  );
+
+  try {
+    const params = makeRoute({ driver: makeDriver({ sessionRateCentsPerMile: 0 }) });
+    const { queryByText } = await render(<RideProgressScreen route={{ params }} navigation={NAV} />);
+
+    await act(async () => { await new Promise(r => setTimeout(r, 300)); });
+    expect(relayPollCallback).not.toBeNull();
+
+    // First tick: null → no status change
+    await act(async () => { await relayPollCallback!(); });
+    // Second tick: RIDE_DECLINED → setStatus("declined_pre_escrow")
+    await act(async () => { await relayPollCallback!(); });
+
+    // "No charge was made" appears only in the declined_pre_escrow card — not in statusCfg.title
+    await waitFor(() => {
+      expect(queryByText(/No charge was made/i)).toBeTruthy();
+    }, { timeout: 5000 });
+
+    expect((global as any).mockAlert.alert).not.toHaveBeenCalledWith(
+      'No Response',
+      expect.any(String),
+      expect.any(Array),
+    );
+  } finally {
+    setIntervalSpy.mockRestore();
+  }
+}, 30000);
+
+// ── RA-RP-022 ─────────────────────────────────────────────────────────────────
+test('RA-RP-022 (BUG-43): Rider "declined" state shows "Find Another Driver" action', async () => {
+  const RELAY_RIDE_ID = '0x' + '01'.repeat(32);
+
+  (global as any).fetch = jest.fn(() => Promise.reject(new Error('Network error')));
+  (relayApi.pollForAcceptance as jest.Mock).mockResolvedValue({
+    rideId: RELAY_RIDE_ID, declined: true,
+  });
+
+  const originalSetInterval = global.setInterval;
+  let relayPollCallback: (() => Promise<void>) | null = null;
+  const setIntervalSpy = jest.spyOn(global, 'setInterval').mockImplementation(
+    ((fn: any, delay: any) => {
+      if (delay === 3000) { relayPollCallback = fn; return 43 as any; }
+      return originalSetInterval(fn, delay);
+    }) as any
+  );
+
+  try {
+    const params = makeRoute({ driver: makeDriver({ sessionRateCentsPerMile: 0 }) });
+    const { queryByText } = await render(<RideProgressScreen route={{ params }} navigation={NAV} />);
+
+    await act(async () => { await new Promise(r => setTimeout(r, 300)); });
+    expect(relayPollCallback).not.toBeNull();
+
+    // Single tick: declined response → setStatus("declined_pre_escrow")
+    await act(async () => { await relayPollCallback!(); });
+
+    // Exact match avoids hitting the description text "…find another driver and try again."
+    await waitFor(() => {
+      expect(queryByText('Find Another Driver')).toBeTruthy();
+    }, { timeout: 5000 });
+  } finally {
+    setIntervalSpy.mockRestore();
+  }
+}, 30000);
+
+// ── RA-RP-023 ─────────────────────────────────────────────────────────────────
+// Use fake timers so both Date.now() and setInterval are controlled together.
+// After the async setup flushes, advancing 93 s fires the interval at a point
+// where Date.now() - startTime = 93_000 > 90_000 → Alert fires synchronously.
+test('RA-RP-023: Genuine timeout (90 s, no decline) shows "No Response" — not "Driver Declined"', async () => {
+  jest.useFakeTimers();
+
+  try {
+    (global as any).fetch = jest.fn(() => Promise.reject(new Error('Network error')));
+    (relayApi.pollForAcceptance as jest.Mock).mockResolvedValue(null);
+
+    const params = makeRoute({ driver: makeDriver({ sessionRateCentsPerMile: 0 }) });
+    render(<RideProgressScreen route={{ params }} navigation={NAV} />);
+
+    // Flush the async chain: loadWalletAndStart → confirmWithServer → fallbackViaRelay → setInterval
+    // Each await in the chain needs one microtask tick; 20 passes is more than enough.
+    for (let i = 0; i < 20; i++) {
+      await act(async () => { await Promise.resolve(); });
+    }
+
+    // Advance past the 90 s acceptance window.
+    // The interval fires every 3 s; at t = 93_000 the check (Date.now() − startTime > 90_000)
+    // is true, so Alert.alert is called synchronously before any await in the callback.
+    await act(async () => { jest.advanceTimersByTime(93_000); });
+
+    expect((global as any).mockAlert.alert).toHaveBeenCalledWith(
+      'No Response',
+      expect.stringContaining("didn't respond"),
+      expect.any(Array),
+    );
+    expect((global as any).mockAlert.alert).not.toHaveBeenCalledWith(
+      expect.stringMatching(/Driver Declined/i),
+      expect.any(String),
+      expect.any(Array),
+    );
+  } finally {
+    jest.useRealTimers();
+  }
+}, 30000);
