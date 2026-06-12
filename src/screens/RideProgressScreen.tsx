@@ -60,14 +60,15 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   const nodeAddress: string = _p.nodeAddress ?? "";
 
   type Status =
-    | "confirming"          // calling /riders/confirm HTTP
-    | "creating_escrow"     // calling createRide on blockchain
-    | "waiting_pickup"      // showing PIN, waiting for pickup confirmation
-    | "driver_arriving"     // pickup confirmed, driver en route
-    | "pending_confirmation"// driver submitted proof
-    | "completed"           // rider confirmed ride
-    | "disputed"            // rider raised dispute
-    | "escalated"           // escalated to DAO after dispute
+    | "confirming"            // calling /riders/confirm HTTP
+    | "creating_escrow"       // calling createRide on blockchain
+    | "waiting_pickup"        // showing PIN, waiting for pickup confirmation
+    | "driver_arriving"       // pickup confirmed, driver en route
+    | "pending_confirmation"  // driver submitted proof
+    | "completed"             // rider confirmed ride
+    | "disputed"              // rider raised dispute
+    | "escalated"             // escalated to DAO after dispute
+    | "cancelled_by_driver"   // driver cancelled the active ride
     | "failed";
 
   const [status, setStatus]           = useState<Status>("confirming");
@@ -82,7 +83,8 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   const [riderPos,  setRiderPos]      = useState({ lat: pickupLat, lng: pickupLng });
   const [elapsed, setElapsed]             = useState(0);
   const [actionLoading, setActionLoading] = useState(false);
-  const [disputedAt, setDisputedAt]   = useState<number | null>(null);
+  const [disputedAt, setDisputedAt]       = useState<number | null>(null);
+  const [waitingPickupAt, setWaitingPickupAt] = useState<number>(0);
   const riderWalletRef       = useRef("");
   const privateKeyRef        = useRef("");
   const fadeAnim             = useRef(new Animated.Value(0)).current;
@@ -143,9 +145,10 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         if (!active) return;
         if (s === 1) { console.log("[POLL] Updating UI to InProgress"); setStatus("driver_arriving"); } // InProgress
         if (s === 2) setStatus("pending_confirmation"); // PendingConfirmation
-        if (s === 3) { clearInterval(poll); setStatus("disputed"); }    // Disputed
-        if (s === 4) { clearInterval(poll); setStatus("escalated"); }   // Escalated
-        if (s === 5) { clearInterval(poll); setStatus("completed"); }   // Completed
+        if (s === 3) { clearInterval(poll); setStatus("disputed"); }             // Disputed
+        if (s === 4) { clearInterval(poll); setStatus("escalated"); }            // Escalated
+        if (s === 5) { clearInterval(poll); setStatus("completed"); }            // Completed
+        if (s === 6) { clearInterval(poll); setStatus("cancelled_by_driver"); } // Cancelled (BUG-33 fix)
       } catch (e: any) {
         console.warn("[POLL] getRideStatus error:", e.message);
       }
@@ -376,6 +379,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       setRideId(newRideId);
       setPin(newPin);
       setTxHash(tx.hash);
+      setWaitingPickupAt(Date.now());
       setStatus("waiting_pickup");
 
     } catch (err: any) {
@@ -494,32 +498,46 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
     ]);
   };
 
-  const handleCancelDueLate = async () => {
+  const handleCancelRide = async (variant: "free_window" | "after_window" | "driver_late") => {
     if (!rideId) return;
-    Alert.alert(
-      "Cancel Ride (Driver Late)",
-      "The driver is running late. You can cancel for a full refund.",
-      [
-        { text: "Keep Waiting", style: "cancel" },
-        { text: "Cancel Ride", style: "destructive", onPress: async () => {
-          setActionLoading(true);
-          try {
-            const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
-            const signer   = new ethers.Wallet(privateKeyRef.current, provider);
-            const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
-            const tx = await escrow.cancelRide(rideId);
-            await tx.wait();
-            Alert.alert("Ride Cancelled", "Your full fare has been refunded.", [
-              { text: "OK", onPress: () => navigation.goBack() },
-            ]);
-          } catch (err: any) {
-            Alert.alert("Cancel Failed", err.message?.slice(0, 200));
-          } finally {
-            setActionLoading(false);
-          }
-        }},
-      ],
-    );
+    const titles: Record<typeof variant, string> = {
+      free_window:  "Cancel Ride (No Penalty)",
+      after_window: "Cancel Ride (Fee Applies)",
+      driver_late:  "Cancel Ride (Full Refund)",
+    };
+    const bodies: Record<typeof variant, string> = {
+      free_window:  "You're within the free cancellation window. Your full fare will be refunded.",
+      after_window: "The free window has passed. A small cancellation fee will be deducted from your refund.",
+      driver_late:  "The driver is running late. You'll receive a full refund and the driver will be penalized.",
+    };
+    const confirmLabels: Record<typeof variant, string> = {
+      free_window:  "Cancel (No Charge)",
+      after_window: "Cancel (Fee Applies)",
+      driver_late:  "Cancel (Full Refund)",
+    };
+    Alert.alert(titles[variant], bodies[variant], [
+      { text: "Keep Waiting", style: "cancel" },
+      { text: confirmLabels[variant], style: "destructive", onPress: async () => {
+        setActionLoading(true);
+        try {
+          const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+          const signer   = new ethers.Wallet(privateKeyRef.current, provider);
+          const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
+          const tx = await escrow.cancelRide(rideId);
+          await tx.wait();
+          const successMsg = variant === "after_window"
+            ? "Ride cancelled. A small fee was deducted from your refund."
+            : "Your full fare has been refunded.";
+          Alert.alert("Ride Cancelled", successMsg, [
+            { text: "OK", onPress: () => navigation.goBack() },
+          ]);
+        } catch (err: any) {
+          Alert.alert("Cancel Failed", err.message?.slice(0, 200));
+        } finally {
+          setActionLoading(false);
+        }
+      }},
+    ]);
   };
 
   const handleExportLog = async () => {
@@ -623,15 +641,16 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   };
 
   const statusCfg = {
-    confirming:           { emoji: "⏳", title: "Finding driver...",             sub: "Connecting to server" },
-    creating_escrow:      { emoji: "🔗", title: "Creating escrow...",            sub: "Locking fare on Polygon" },
-    waiting_pickup:       { emoji: "📍", title: "Driver is on the way",          sub: "Show PIN to driver at pickup" },
-    driver_arriving:      { emoji: "🚗", title: "Ride in Progress",              sub: driver.vehicle },
-    pending_confirmation: { emoji: "✋", title: "Confirm your ride",             sub: "Driver has completed the route" },
-    completed:            { emoji: "✅", title: "You've arrived!",               sub: "Payment released" },
-    disputed:             { emoji: "⚠️", title: "Dispute raised",               sub: "Awaiting verifier review" },
-    escalated:            { emoji: "🏛", title: "Escalated to DAO",              sub: "DeRide DAO is reviewing" },
-    failed:               { emoji: "❌", title: "Something went wrong",          sub: "Please try again" },
+    confirming:            { emoji: "⏳", title: "Finding driver...",             sub: "Connecting to server" },
+    creating_escrow:       { emoji: "🔗", title: "Creating escrow...",            sub: "Locking fare on Polygon" },
+    waiting_pickup:        { emoji: "📍", title: "Driver is on the way",          sub: "Show PIN to driver at pickup" },
+    driver_arriving:       { emoji: "🚗", title: "Ride in Progress",              sub: driver.vehicle },
+    pending_confirmation:  { emoji: "✋", title: "Confirm your ride",             sub: "Driver has completed the route" },
+    completed:             { emoji: "✅", title: "You've arrived!",               sub: "Payment released" },
+    disputed:              { emoji: "⚠️", title: "Dispute raised",               sub: "Awaiting verifier review" },
+    escalated:             { emoji: "🏛", title: "Escalated to DAO",              sub: "DeRide DAO is reviewing" },
+    cancelled_by_driver:   { emoji: "❌", title: "Driver cancelled",              sub: "Your refund is being processed" },
+    failed:                { emoji: "❌", title: "Something went wrong",          sub: "Please try again" },
   }[status];
 
   return (
@@ -703,7 +722,15 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
 
         {/* PIN display + live ETA */}
         {status === "waiting_pickup" && pin !== null && (() => {
-          const driverLate = etaMinutes !== null && etaMinutes > originalEtaMins.current * 3;
+          const driverLate     = etaMinutes !== null && etaMinutes > originalEtaMins.current * 3;
+          const withinFreeWin  = waitingPickupAt > 0 && Date.now() - waitingPickupAt < 300_000;
+          const cancelVariant  = driverLate ? "driver_late" : withinFreeWin ? "free_window" : "after_window";
+          const cancelLabel    = driverLate
+            ? "Cancel (Full Refund)"
+            : withinFreeWin
+            ? "Cancel Ride (No Penalty)"
+            : "Cancel Ride (Fee Applies)";
+          const cancelColor    = driverLate ? "#FF8800" : "#FF4444";
           return (
             <View style={{ gap: 10 }}>
               <View style={[styles.pinCard, { backgroundColor: Colors.brandGlow, borderColor: Colors.brand }]}>
@@ -735,21 +762,20 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
                   <Text style={{ color: "#FF8800", fontSize: 14, fontWeight: "700", marginBottom: 8 }}>
                     Driver is running late
                   </Text>
-                  <Text style={{ color: colors.textSub, fontSize: 13, marginBottom: 12, textAlign: "center" }}>
+                  <Text style={{ color: colors.textSub, fontSize: 13, marginBottom: 4, textAlign: "center" }}>
                     Your driver is {etaMinutes} min away (expected {originalEtaMins.current} min).
-                    You can cancel for a full refund.
                   </Text>
-                  <TouchableOpacity
-                    style={[styles.disputeBtn, { borderColor: "#FF8800" }, actionLoading && { opacity: 0.7 }]}
-                    onPress={handleCancelDueLate}
-                    disabled={actionLoading}
-                  >
-                    <Text style={{ color: "#FF8800", fontSize: 14, fontWeight: "600" }}>
-                      Cancel (Full Refund)
-                    </Text>
-                  </TouchableOpacity>
                 </View>
               )}
+              <TouchableOpacity
+                style={[styles.disputeBtn, { borderColor: cancelColor }, actionLoading && { opacity: 0.7 }]}
+                onPress={() => handleCancelRide(cancelVariant)}
+                disabled={actionLoading}
+              >
+                <Text style={{ color: cancelColor, fontSize: 14, fontWeight: "600" }}>
+                  {cancelLabel}
+                </Text>
+              </TouchableOpacity>
             </View>
           );
         })()}
@@ -853,6 +879,24 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
               <Text style={{ color: colors.textSub, fontSize: 14, fontWeight: "600" }}>
                 Export Ride Log
               </Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {status === "cancelled_by_driver" && (
+          <View>
+            <View style={[styles.successCard, { backgroundColor: "#1a0000", borderColor: "#FF4444" }]}>
+              <Text style={{ color: "#FF4444", fontSize: 20, fontWeight: "700" }}>Ride Cancelled</Text>
+              <Text style={{ color: "#aaa", fontSize: 13, marginTop: 8, textAlign: "center" }}>
+                Your driver cancelled the ride. Your full fare plus the driver's cancellation penalty has been refunded to your wallet.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[{ padding: 20, borderRadius: 16, alignItems: "center", marginTop: 12,
+                backgroundColor: Colors.brand }]}
+              onPress={() => navigation.goBack()}
+            >
+              <Text style={[{ color: "#000", fontSize: 16, fontWeight: "700" }]}>Find Another Driver</Text>
             </TouchableOpacity>
           </View>
         )}
