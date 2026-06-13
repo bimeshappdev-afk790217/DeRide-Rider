@@ -93,7 +93,7 @@ export async function clearRelayMessage(privateKey: string): Promise<void> {
     if (!exists) return;
     const feeData      = await provider.getFeeData();
     const maxFeePerGas = feeData.maxFeePerGas! * 150n / 100n;
-    const tx = await relay.clearMessage({ gasLimit: 100_000, maxFeePerGas });
+    const tx = await relay.clearMessage({ gasLimit: 300_000, maxFeePerGas });
     await tx.wait();
     console.log("[RELAY] clearMessage confirmed");
   } catch (e: any) {
