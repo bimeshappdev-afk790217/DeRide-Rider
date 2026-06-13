@@ -396,10 +396,15 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
 
       const etaSeconds = BigInt(Math.round(originalEtaMins.current * 60));
-      // In the relay fallback (server down) there is no matching-server node, so
-      // nodeAddr arrives as "". Ethers v6 treats "" as an ENS name and throws
-      // "unconfigured name" on Polygon. Use ZeroAddress instead.
-      const safeNodeAddr = nodeAddr || ethers.ZeroAddress;
+      // Guard: reject empty strings, non-addresses, and values in the reserved range
+      // (uint160 ≤ 0xFFFF). The last case catches integer-coercion bugs such as the
+      // matching server returning offerMultiplier=100 in the nodeAddress field, which
+      // ethers.js silently converts to address(100) = 0x0000...0064 — a dead address.
+      const isValidNode = nodeAddr
+        && typeof nodeAddr === 'string'
+        && ethers.isAddress(nodeAddr)
+        && BigInt(nodeAddr) > 0xFFFFn;
+      const safeNodeAddr = isValidNode ? nodeAddr : ethers.ZeroAddress;
 
       let tx: any;
       if (committedFareWei && driverSig) {
