@@ -12,7 +12,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 import { postRideRequest, pollForAcceptance, clearRelayMessage, generateRideId } from "../services/api";
 import { getPolUsdFromOracle } from "../services/chainlinkOracle";
-import { fetchForexRates, formatLocal } from "../services/currencyService";
+import { fetchForexRates, polToLocal, formatLocal } from "../services/currencyService";
 import { WebRTCGPSAnswerer } from "../services/WebRTCGPS";
 
 const _ESCROW_ENV = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS;
@@ -340,13 +340,25 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         const balance = await balProvider.getBalance(riderWalletRef.current);
         const fareWeiBig = BigInt(data.fareWei);
         if (balance < fareWeiBig) {
-          const needed = (Number(fareWeiBig) / 1e18).toFixed(4);
-          const have   = (Number(balance)    / 1e18).toFixed(4);
-          Alert.alert(
-            "Insufficient Balance",
-            `This ride costs ${needed} POL but your wallet only has ${have} POL. Please top up and try again.`,
-            [{ text: "OK", onPress: () => navigation.goBack() }],
-          );
+          const farePolAmt    = Number(fareWeiBig) / 1e18;
+          const havePolAmt    = Number(balance)    / 1e18;
+          const shortfallPol  = farePolAmt - havePolAmt;
+          let alertMsg = `This ride costs ${farePolAmt.toFixed(4)} POL but your wallet only has ${havePolAmt.toFixed(4)} POL. Please top up and try again.`;
+          try {
+            const currency  = await AsyncStorage.getItem("app_currency") ?? "USD";
+            const [polPrice, fxRates] = await Promise.all([
+              getPolUsdFromOracle(),
+              fetchForexRates(),
+            ]);
+            const fx = fxRates?.[currency] ?? null;
+            if (polPrice && fx) {
+              const fareLocal     = formatLocal(polToLocal(farePolAmt,   polPrice, fx), currency);
+              const haveLocal     = formatLocal(polToLocal(havePolAmt,   polPrice, fx), currency);
+              const shortLocal    = formatLocal(polToLocal(shortfallPol, polPrice, fx), currency);
+              alertMsg = `This ride costs ${fareLocal} (${farePolAmt.toFixed(4)} POL) but your wallet only has ${haveLocal} (${havePolAmt.toFixed(4)} POL). Top up ${shortLocal} (${shortfallPol.toFixed(4)} POL) to proceed.`;
+            }
+          } catch { /* keep POL-only message */ }
+          Alert.alert("Insufficient Balance", alertMsg, [{ text: "OK", onPress: () => navigation.goBack() }]);
           setStatus("failed");
           return;
         }
@@ -623,13 +635,23 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         const balance = await balProvider.getBalance(riderWalletRef.current);
         const fareWeiBig = BigInt(fareWei);
         if (balance < fareWeiBig) {
-          const needed = (Number(fareWeiBig) / 1e18).toFixed(4);
-          const have   = (Number(balance)    / 1e18).toFixed(4);
-          Alert.alert(
-            "Insufficient Balance",
-            `This ride costs ${needed} POL but your wallet only has ${have} POL. Please top up and try again.`,
-            [{ text: "OK", onPress: () => navigation.goBack() }],
-          );
+          // polPriceUsd already computed above; only need forex for local display
+          const farePolAmt    = Number(fareWeiBig) / 1e18;
+          const havePolAmt    = Number(balance)    / 1e18;
+          const shortfallPol  = farePolAmt - havePolAmt;
+          let alertMsg = `This ride costs ${farePolAmt.toFixed(4)} POL but your wallet only has ${havePolAmt.toFixed(4)} POL. Please top up and try again.`;
+          try {
+            const currency = await AsyncStorage.getItem("app_currency") ?? "USD";
+            const fxRates  = await fetchForexRates();
+            const fx       = fxRates?.[currency] ?? null;
+            if (fx) {
+              const fareLocal  = formatLocal(polToLocal(farePolAmt,   polPriceUsd, fx), currency);
+              const haveLocal  = formatLocal(polToLocal(havePolAmt,   polPriceUsd, fx), currency);
+              const shortLocal = formatLocal(polToLocal(shortfallPol, polPriceUsd, fx), currency);
+              alertMsg = `This ride costs ${fareLocal} (${farePolAmt.toFixed(4)} POL) but your wallet only has ${haveLocal} (${havePolAmt.toFixed(4)} POL). Top up ${shortLocal} (${shortfallPol.toFixed(4)} POL) to proceed.`;
+            }
+          } catch { /* keep POL-only message */ }
+          Alert.alert("Insufficient Balance", alertMsg, [{ text: "OK", onPress: () => navigation.goBack() }]);
           setStatus("failed");
           return;
         }
@@ -900,7 +922,9 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
             <View style={[styles.successCard, { backgroundColor: Colors.brandGlow, borderColor: Colors.brand }]}>
               <Text style={[{ color: Colors.brand, fontSize: 20, fontWeight: "700" }]}>✓ Ride Complete</Text>
               <Text style={[{ color: Colors.brandDim, fontSize: 13, marginTop: 4 }]}>
-                Payment released · ${fareUSD}
+                Payment released · {ratesAvail
+                ? `${formatLocal(fareUSD * forexRate!, localCurrency)} ($${fareUSD.toFixed(2)})`
+                : `$${fareUSD.toFixed(2)}`}
               </Text>
             </View>
             <TouchableOpacity

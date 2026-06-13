@@ -116,4 +116,20 @@ describe('verifyFareWei', () => {
     // original (1×) fare should fail ±1% check against 1.25× expected
     expect(oracle.verifyFareWei(expectedWei.toString(), sessionRateCPM, distMi, 125, polPriceUsd)).toBe(false);
   });
+
+  // ── Relay-path tolerance (±5%) ─────────────────────────────────────────────
+  test('OR-006h: 2.5% deviation with tolerancePct=5 → true (within relay band)', () => {
+    const drift = expectedWei * 1025n / 1000n; // +2.5%
+    expect(oracle.verifyFareWei(drift.toString(), sessionRateCPM, distMi, offerMultiplier, polPriceUsd, 5)).toBe(true);
+  });
+
+  test('OR-006i: 6% deviation with tolerancePct=5 → false (outside relay band)', () => {
+    const drift = expectedWei * 1060n / 1000n; // +6%
+    expect(oracle.verifyFareWei(drift.toString(), sessionRateCPM, distMi, offerMultiplier, polPriceUsd, 5)).toBe(false);
+  });
+
+  test('OR-006j: exactly 5% deviation with tolerancePct=5 → true (boundary inclusive)', () => {
+    const drift = expectedWei * 105n / 100n; // exactly +5%
+    expect(oracle.verifyFareWei(drift.toString(), sessionRateCPM, distMi, offerMultiplier, polPriceUsd, 5)).toBe(true);
+  });
 });

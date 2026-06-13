@@ -10,6 +10,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Location from 'expo-location';
 import { makeContractMock, makeProviderMock, mockTx } from '../mocks/blockchain';
+import { _resetForexCache } from '../../src/services/currencyService';
 
 const mockContract = makeContractMock();
 const mockProvider = makeProviderMock();
@@ -154,6 +155,7 @@ const NAV = { navigate: jest.fn(), goBack: jest.fn() };
 
 beforeEach(() => {
   jest.clearAllMocks();
+  _resetForexCache(); // prevent stale forex data from bleeding between tests
   setupWallet();
   setupConfirmSuccess();
   mockTx.wait.mockResolvedValue({ status: 1 });
@@ -896,6 +898,53 @@ test('RA-B-013: Server path — insufficient balance shows alert, does NOT call 
   }, { timeout: 5000 });
 
   expect(mockContract.createRide).not.toHaveBeenCalled();
+});
+
+// ── RA-B-014 (balance check — local currency) ─────────────────────────────────
+// Relay path: when forex rates are available, the insufficient-balance alert must
+// show local currency as the primary value with POL as secondary.
+// Setup: INR currency, oracle=$0.50/POL, INR=83. Fare=13 POL ($6.50/0.5), balance=5 POL.
+// Expected local: ₹540 fare, ₹208 balance, ₹332 shortfall (all × 0.5 × 83).
+test('RA-B-014: Relay path — insufficient balance shows local-currency primary when forex available', async () => {
+  const alertSpy = jest.spyOn(Alert, 'alert');
+
+  // 5 POL balance; fare = 13 POL (6.50 USD ÷ $0.50/POL)
+  mockProvider.getBalance.mockResolvedValue(BigInt('5000000000000000000'));
+
+  // Currency preference: INR
+  (AsyncStorage.getItem as jest.Mock).mockImplementation((key: string) => {
+    if (key === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
+    if (key === 'app_currency') return Promise.resolve('INR');
+    return Promise.resolve(null);
+  });
+
+  (global as any).fetch = jest.fn((url: string) => {
+    if (url.includes('/riders/') || url.includes('/drivers/')) {
+      return Promise.reject(new Error('Server unreachable'));
+    }
+    // forex endpoint → return INR rates
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ result: 'success', rates: { USD: 1, INR: 83 } }),
+    });
+  });
+
+  const params = makeRoute(); // fareUSD=6.50, multiplier=100, oracle mock=0.5
+  await render(<RideProgressScreen route={{ params }} navigation={NAV} />);
+
+  await waitFor(() => {
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Insufficient Balance',
+      expect.stringMatching(/₹/),   // local symbol shown
+      expect.any(Array),
+    );
+  }, { timeout: 5000 });
+
+  // POL amount still present as secondary
+  const alertArgs = (alertSpy.mock.calls as any[][]).find(c => c[0] === 'Insufficient Balance');
+  expect(alertArgs?.[1]).toMatch(/POL/);
+
+  expect(relayApi.postRideRequest).not.toHaveBeenCalled();
 });
 
 // ── RA-RP-023 ─────────────────────────────────────────────────────────────────
