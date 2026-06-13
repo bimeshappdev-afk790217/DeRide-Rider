@@ -162,6 +162,7 @@ beforeEach(() => {
   mockContract.disputeRide.mockResolvedValue(mockTx);
   mockContract.cancelRide.mockResolvedValue(mockTx);
   mockContract.getRideStatus.mockResolvedValue(0n);
+  mockProvider.getBalance.mockResolvedValue(BigInt('50000000000000000000')); // 50 POL — above any test fare
   (Location.requestForegroundPermissionsAsync as jest.Mock).mockResolvedValue({ status: 'granted' });
   (Location.getCurrentPositionAsync as jest.Mock).mockResolvedValue({
     coords: { latitude: 39.7589, longitude: -84.1916 },
@@ -827,6 +828,75 @@ test('RA-RP-022 (BUG-43): Rider "declined" state shows "Find Another Driver" act
     setIntervalSpy.mockRestore();
   }
 }, 30000);
+
+// ── RA-B-012 (balance check) ──────────────────────────────────────────────────
+// Relay path: if the rider's wallet balance is below the computed fareWei,
+// the app must alert before even sending a request to the driver.
+// Scenario: fareUSD=6.50, polPrice=0.5 → fareWei=13 POL; balance=5 POL → shortfall.
+test('RA-B-012: Relay path — insufficient balance shows alert, does NOT call postRideRequest', async () => {
+  const alertSpy = jest.spyOn(Alert, 'alert');
+
+  // 5 POL balance, but fare = 13 POL (6.50 USD / $0.50 per POL)
+  mockProvider.getBalance.mockResolvedValue(BigInt('5000000000000000000'));
+  (global as any).fetch = jest.fn(() => Promise.reject(new Error('Server unreachable')));
+
+  const params = makeRoute(); // fareUSD=6.50, multiplier=100, oracle=0.5
+  await render(<RideProgressScreen route={{ params }} navigation={NAV} />);
+
+  await waitFor(() => {
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Insufficient Balance',
+      expect.stringContaining('POL'),
+      expect.any(Array),
+    );
+  }, { timeout: 5000 });
+
+  // Must not bother the driver when the rider can't pay
+  expect(relayApi.postRideRequest).not.toHaveBeenCalled();
+});
+
+// ── RA-B-013 (balance check) ──────────────────────────────────────────────────
+// Server path: same pre-flight check after receiving fareWei from the matching
+// server but before calling createRide.
+// Scenario: server returns fareWei=20 POL; balance=1 POL → shortfall.
+test('RA-B-013: Server path — insufficient balance shows alert, does NOT call createRide', async () => {
+  const alertSpy = jest.spyOn(Alert, 'alert');
+
+  // 1 POL balance, server returns 20 POL fare
+  mockProvider.getBalance.mockResolvedValue(BigInt('1000000000000000000'));
+  (global as any).fetch = jest.fn((url: string) => {
+    if (url.includes('/riders/confirm')) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ok: true,
+          rideId: RIDE_ID,
+          driverWallet: DRIVER_ADDR,
+          fareWei: '20000000000000000000', // 20 POL
+          fareUSD: 10.00,
+          nodeAddress: NODE_ADDR,
+        }),
+      });
+    }
+    if (url.includes('/drivers/') && url.includes('/status')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ online: true }) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  });
+
+  const params = makeRoute();
+  await render(<RideProgressScreen route={{ params }} navigation={NAV} />);
+
+  await waitFor(() => {
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Insufficient Balance',
+      expect.stringContaining('POL'),
+      expect.any(Array),
+    );
+  }, { timeout: 5000 });
+
+  expect(mockContract.createRide).not.toHaveBeenCalled();
+});
 
 // ── RA-RP-023 ─────────────────────────────────────────────────────────────────
 // Use fake timers so both Date.now() and setInterval are controlled together.

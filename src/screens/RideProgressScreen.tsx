@@ -310,6 +310,25 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       }
 
       setFareUSD(data.fareUSD);
+
+      // Pre-flight balance check — catch shortfall before spending gas on createRide
+      {
+        const balProvider = new ethers.JsonRpcProvider(POLYGON_RPC);
+        const balance = await balProvider.getBalance(riderWalletRef.current);
+        const fareWeiBig = BigInt(data.fareWei);
+        if (balance < fareWeiBig) {
+          const needed = (Number(fareWeiBig) / 1e18).toFixed(4);
+          const have   = (Number(balance)    / 1e18).toFixed(4);
+          Alert.alert(
+            "Insufficient Balance",
+            `This ride costs ${needed} POL but your wallet only has ${have} POL. Please top up and try again.`,
+            [{ text: "OK", onPress: () => navigation.goBack() }],
+          );
+          setStatus("failed");
+          return;
+        }
+      }
+
       await createEscrowRide(data.rideId, data.driverWallet, data.fareWei, data.nodeAddress ?? nodeAddress);
 
     } catch {
@@ -574,6 +593,24 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         : driver.fareUSD * offerMultiplier / 100; // pre-upgrade fallback
       const polPriceUsd = await getPolUsdFromOracle();
       const fareWei = BigInt(Math.round((actualFareUSD / polPriceUsd) * 1e18)).toString();
+
+      // Pre-flight balance check — abort before asking the driver if funds are short
+      {
+        const balProvider = new ethers.JsonRpcProvider(POLYGON_RPC);
+        const balance = await balProvider.getBalance(riderWalletRef.current);
+        const fareWeiBig = BigInt(fareWei);
+        if (balance < fareWeiBig) {
+          const needed = (Number(fareWeiBig) / 1e18).toFixed(4);
+          const have   = (Number(balance)    / 1e18).toFixed(4);
+          Alert.alert(
+            "Insufficient Balance",
+            `This ride costs ${needed} POL but your wallet only has ${have} POL. Please top up and try again.`,
+            [{ text: "OK", onPress: () => navigation.goBack() }],
+          );
+          setStatus("failed");
+          return;
+        }
+      }
 
       // Generate rideId upfront so we can verify acceptance matches this exact ride
       const newRideId = await generateRideId();
