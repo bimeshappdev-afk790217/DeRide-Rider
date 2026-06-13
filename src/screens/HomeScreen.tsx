@@ -11,6 +11,8 @@ import * as Location from 'expo-location';
 import { ethers } from "ethers";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Typography, Spacing, Radius, Shadow } from "../theme";
+import { getPolUsdFromOracle } from "../services/chainlinkOracle";
+import { fetchForexRates, formatLocal } from "../services/currencyService";
 
 const ALCHEMY_URL         = process.env.EXPO_PUBLIC_ALCHEMY_URL                  ?? "";
 const DRIVER_AVAILABILITY = process.env.EXPO_PUBLIC_DRIVER_AVAILABILITY_ADDRESS  ?? "";
@@ -128,7 +130,7 @@ const OFFER_COLORS: Record<number, { bg: string; border: string; text: string }>
 };
 
 
-const DriverCard = ({ driver, onSelect, selected }: any) => {
+const DriverCard = ({ driver, onSelect, selected, localFare, polFare }: any) => {
   const { colors } = useTheme();
   const isSelected = selected?.address === driver.address;
   return (
@@ -157,7 +159,16 @@ const DriverCard = ({ driver, onSelect, selected }: any) => {
       </View>
       <View style={styles.driverRight}>
         <Text style={[styles.driverFareLbl, { color: colors.textSub }]}>Est. fare</Text>
-        <Text style={[styles.driverFare, { color: Colors.brand }]}>${(driver.fareUSD ?? 0).toFixed(2)}</Text>
+        {localFare ? (
+          <>
+            <Text style={[styles.driverFareHero, { color: Colors.brand }]} testID="driver-fare-local">{localFare}</Text>
+            {polFare && (
+              <Text style={[styles.driverFarePol, { color: colors.textMuted }]}>({polFare} POL)</Text>
+            )}
+          </>
+        ) : (
+          <Text style={[styles.driverFare, { color: Colors.brand }]}>${(driver.fareUSD ?? 0).toFixed(2)}</Text>
+        )}
         <Text style={[styles.driverEta, { color: colors.textSub }]}>
           {driver.eta != null ? `${driver.eta} min` : "—"}
         </Text>
@@ -187,11 +198,37 @@ export const HomeScreen = ({ navigation }: any) => {
   const [walletAddress, setWalletAddress] = useState("");
   const [countryCode, setCountryCode]     = useState("us");
   const [recentDests, setRecentDests]     = useState<RecentDest[]>([]);
+  const [localCurrency, setLocalCurrency] = useState("USD");
+  const [polUsdRate,    setPolUsdRate]    = useState<number | null>(null);
+  const [forexRate,     setForexRate]     = useState<number | null>(null);
+  const [ratesAvail,    setRatesAvail]    = useState(false);
   const nodeAddressRef = useRef<string>("");
   const debounceRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mapRef    = useRef<MapView>(null);
   const slideAnim = useRef(new Animated.Value(300)).current;
   const fadeAnim  = useRef(new Animated.Value(0)).current;
+
+  const loadRates = useCallback(async (force = false) => {
+    try {
+      const currency = await AsyncStorage.getItem("app_currency") ?? "USD";
+      setLocalCurrency(currency);
+      const [priceRes, ratesRes] = await Promise.allSettled([
+        getPolUsdFromOracle(),
+        fetchForexRates(force),
+      ]);
+      const price = priceRes.status === "fulfilled" ? priceRes.value : null;
+      const rates = ratesRes.status === "fulfilled" ? ratesRes.value : null;
+      if (price !== null && rates && currency in rates) {
+        setPolUsdRate(price);
+        setForexRate(rates[currency]);
+        setRatesAvail(true);
+      } else {
+        setRatesAvail(false);
+      }
+    } catch {
+      setRatesAvail(false);
+    }
+  }, []);
 
   const reportNodeFailure = (nodeAddr: string) => {
     if (!nodeAddr || !ethers.isAddress(nodeAddr)) return;
@@ -226,6 +263,12 @@ export const HomeScreen = ({ navigation }: any) => {
   };
 
   useEffect(() => {
+    const unsub = navigation.addListener("focus", () => loadRates(false));
+    return unsub;
+  }, [navigation, loadRates]);
+
+  useEffect(() => {
+    loadRates();
     Animated.timing(fadeAnim, { toValue: 1, duration: 600, useNativeDriver: true }).start();
     AsyncStorage.getItem("rider_wallet_address").then(addr => {
       if (addr) setWalletAddress(addr);
@@ -973,14 +1016,25 @@ export const HomeScreen = ({ navigation }: any) => {
               </View>
             )}
 
-            {!loading && drivers.map((driver, i) => (
-              <DriverCard
-                key={i}
-                driver={driver}
-                selected={selected}
-                onSelect={(d: any) => { setSelected(d); setShowOfferSheet(true); }}
-              />
-            ))}
+            {!loading && drivers.map((driver, i) => {
+              const fareUSD  = driver.fareUSD ?? 0;
+              const localFareStr = (ratesAvail && forexRate)
+                ? formatLocal(fareUSD * forexRate, localCurrency)
+                : null;
+              const polFareStr = (polUsdRate && polUsdRate > 0)
+                ? (fareUSD / polUsdRate).toFixed(2)
+                : null;
+              return (
+                <DriverCard
+                  key={i}
+                  driver={driver}
+                  selected={selected}
+                  onSelect={(d: any) => { setSelected(d); setShowOfferSheet(true); }}
+                  localFare={localFareStr}
+                  polFare={polFareStr}
+                />
+              );
+            })}
 
             {selected && (
               <TouchableOpacity style={[styles.confirmBtn, Shadow.brand]} onPress={() => setShowOfferSheet(true)}>
@@ -1036,9 +1090,24 @@ export const HomeScreen = ({ navigation }: any) => {
                     </Text>
                   )}
                 </View>
-                <Text style={[styles.offerFare, { color: isActive ? oc.text : colors.text }]}>
-                  ${offer.fareUSD.toFixed(2)}
-                </Text>
+                <View style={{ alignItems: "flex-end" }}>
+                  {(ratesAvail && forexRate) ? (
+                    <>
+                      <Text style={[styles.offerFare, { color: isActive ? oc.text : colors.text }]} testID={`offer-local-${offer.multiplier}`}>
+                        {formatLocal(offer.fareUSD * forexRate, localCurrency)}
+                      </Text>
+                      {polUsdRate && polUsdRate > 0 && (
+                        <Text style={[styles.offerPolSub, { color: colors.textMuted }]}>
+                          ({(offer.fareUSD / polUsdRate).toFixed(2)} POL)
+                        </Text>
+                      )}
+                    </>
+                  ) : (
+                    <Text style={[styles.offerFare, { color: isActive ? oc.text : colors.text }]}>
+                      ${offer.fareUSD.toFixed(2)}
+                    </Text>
+                  )}
+                </View>
                 {isActive && (
                   <Text style={[{ fontSize: 16, marginLeft: 8, color: oc.text }]}>✓</Text>
                 )}
@@ -1054,7 +1123,14 @@ export const HomeScreen = ({ navigation }: any) => {
             }}
           >
             <Text style={styles.offerConfirmText}>
-              Confirm · ${fareOffers.find(o => o.multiplier === selectedOffer)?.fareUSD.toFixed(2) ?? "—"}
+              {(() => {
+                const offer = fareOffers.find(o => o.multiplier === selectedOffer);
+                if (!offer) return "Confirm";
+                if (ratesAvail && forexRate) {
+                  return `Confirm · ${formatLocal(offer.fareUSD * forexRate, localCurrency)}`;
+                }
+                return `Confirm · $${offer.fareUSD.toFixed(2)}`;
+              })()}
             </Text>
           </TouchableOpacity>
         </View>
@@ -1148,6 +1224,8 @@ const styles = StyleSheet.create({
   driverRight:    { alignItems: "flex-end" },
   driverFareLbl:  { fontSize: 10, fontWeight: "500", marginBottom: 1 },
   driverFare:     { fontSize: 18, fontWeight: "700" },
+  driverFareHero: { fontSize: 18, fontWeight: "700" },
+  driverFarePol:  { fontSize: 11, marginTop: 1 },
   driverEta:      { fontSize: 12, marginTop: 2 },
   confirmBtn:      { backgroundColor: "#00E5A0", padding: 20, borderRadius: 16, alignItems: "center", marginTop: 8 },
   confirmBtnText:  { color: "#000", fontSize: 16, fontWeight: "700" },
@@ -1174,6 +1252,7 @@ const styles = StyleSheet.create({
   offerLabel:       { fontSize: 15, fontWeight: "700" },
   offerWarning:     { fontSize: 11, marginTop: 2 },
   offerFare:        { fontSize: 18, fontWeight: "700" },
+  offerPolSub:      { fontSize: 11, marginTop: 2 },
   offerConfirmBtn:  { backgroundColor: "#00E5A0", padding: 18, borderRadius: 16,
                       alignItems: "center", marginTop: 8 },
   offerConfirmText: { color: "#000", fontSize: 16, fontWeight: "700" },

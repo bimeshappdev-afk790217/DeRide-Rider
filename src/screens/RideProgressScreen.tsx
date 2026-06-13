@@ -12,6 +12,7 @@ import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 import { postRideRequest, pollForAcceptance, clearRelayMessage, generateRideId } from "../services/api";
 import { getPolUsdFromOracle } from "../services/chainlinkOracle";
+import { fetchForexRates, formatLocal } from "../services/currencyService";
 import { WebRTCGPSAnswerer } from "../services/WebRTCGPS";
 
 const _ESCROW_ENV = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS;
@@ -77,6 +78,10 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   const [pin, setPin]                 = useState<number | null>(null);
   const [txHash, setTxHash]           = useState<string | null>(null);
   const [fareUSD, setFareUSD]         = useState(driver.fareUSD ?? 0);
+  const [localCurrency, setLocalCurrency] = useState("USD");
+  const [polUsdRate,    setPolUsdRate]    = useState<number | null>(null);
+  const [forexRate,     setForexRate]     = useState<number | null>(null);
+  const [ratesAvail,    setRatesAvail]    = useState(false);
   const [eta, setEta]                 = useState(driver.eta ?? 5);
   const [etaMinutes, setEtaMinutes]   = useState<number | null>(driver.eta ?? null);
   const originalEtaMins               = useRef<number>(driver.eta ?? 5);
@@ -107,6 +112,24 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
           setRiderPos({ lat: loc.coords.latitude, lng: loc.coords.longitude });
         }
       } catch { /* keep param coords */ }
+    })();
+    // Load display rates (display-only, graceful)
+    (async () => {
+      try {
+        const currency = await AsyncStorage.getItem("app_currency") ?? "USD";
+        setLocalCurrency(currency);
+        const [priceRes, ratesRes] = await Promise.allSettled([
+          getPolUsdFromOracle(),
+          fetchForexRates(),
+        ]);
+        const price = priceRes.status === "fulfilled" ? priceRes.value : null;
+        const rates = ratesRes.status === "fulfilled" ? ratesRes.value : null;
+        if (price !== null && rates && currency in rates) {
+          setPolUsdRate(price);
+          setForexRate(rates[currency]);
+          setRatesAvail(true);
+        }
+      } catch { /* rates unavailable — show POL only */ }
     })();
   }, []);
 
@@ -750,7 +773,20 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         <View style={[styles.details, { borderColor: colors.border }]}>
           <View style={styles.detailItem}>
             <Text style={[styles.detailLabel, { color: colors.textSub }]}>Fare</Text>
-            <Text style={[styles.detailValue, { color: Colors.brand }]}>${fareUSD}</Text>
+            {(ratesAvail && forexRate) ? (
+              <>
+                <Text style={[styles.detailValue, { color: Colors.brand }]} testID="fare-local">
+                  {formatLocal(fareUSD * forexRate, localCurrency)}
+                </Text>
+                {polUsdRate && polUsdRate > 0 && (
+                  <Text style={[{ fontSize: 10, color: colors.textMuted, marginTop: 1 }]}>
+                    ({(fareUSD / polUsdRate).toFixed(2)} POL)
+                  </Text>
+                )}
+              </>
+            ) : (
+              <Text style={[styles.detailValue, { color: Colors.brand }]}>${fareUSD}</Text>
+            )}
           </View>
           <View style={[{ width: 1, marginHorizontal: 8, backgroundColor: colors.border }]} />
           <View style={styles.detailItem}>

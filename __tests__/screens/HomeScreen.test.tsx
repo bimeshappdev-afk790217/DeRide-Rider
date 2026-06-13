@@ -56,7 +56,7 @@ jest.mock('ethers', () => {
 
 import { HomeScreen } from '../../src/screens/HomeScreen';
 
-const NAV = { navigate: jest.fn(), goBack: jest.fn() };
+const NAV = { navigate: jest.fn(), goBack: jest.fn(), addListener: jest.fn(() => () => {}) };
 const RIDER_ADDR = '0x' + 'a'.repeat(40);
 
 const makeDriver = (overrides: any = {}) => ({
