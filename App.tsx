@@ -6,10 +6,11 @@ import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { Text } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { ThemeProvider, useTheme } from "./src/theme/ThemeContext";
-import { HomeScreen }         from "./src/screens/HomeScreen";
-import { RideProgressScreen } from "./src/screens/RideProgressScreen";
-import { ProfileScreen }      from "./src/screens/ProfileScreen";
-import { RegisterScreen }     from "./src/screens/RegisterScreen";
+import { HomeScreen }           from "./src/screens/HomeScreen";
+import { RideProgressScreen }  from "./src/screens/RideProgressScreen";
+import { RideHistoryScreen }   from "./src/screens/RideHistoryScreen";
+import { ProfileScreen }       from "./src/screens/ProfileScreen";
+import { RegisterScreen }      from "./src/screens/RegisterScreen";
 import { Colors } from "./src/theme";
 
 const Stack = createNativeStackNavigator();
@@ -48,7 +49,7 @@ const TabNavigator = () => {
       />
       <Tab.Screen
         name="History"
-        component={HomeScreen}
+        component={RideHistoryScreen}
         options={{
           tabBarLabel: "History",
           tabBarIcon: ({ focused }) => (
