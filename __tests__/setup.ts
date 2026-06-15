@@ -139,17 +139,18 @@ jest.mock('../src/components/TransakWebView', () => {
   };
 });
 
-// MapView — use forwardRef so mapRef.current gets an object with fitToCoordinates
+// MapView — use forwardRef so mapRef.current gets an object with fitToCoordinates.
+// mockMapRefMethods is exposed on global so individual tests can make fitToCoordinates throw.
+(global as any).mockMapRefMethods = {
+  fitToCoordinates: jest.fn(),
+  animateToRegion: jest.fn(),
+  fitToElements: jest.fn(),
+};
 jest.mock('react-native-maps', () => {
   const React = require('react');
   const { View } = require('react-native');
-  const mapRefMethods = {
-    fitToCoordinates: jest.fn(),
-    animateToRegion: jest.fn(),
-    fitToElements: jest.fn(),
-  };
   const MockMapView = React.forwardRef((props: any, ref: any) => {
-    React.useImperativeHandle(ref, () => mapRefMethods);
+    React.useImperativeHandle(ref, () => (global as any).mockMapRefMethods);
     return React.createElement(View, { testID: 'map-view', ...props });
   });
   MockMapView.displayName = 'MockMapView';

@@ -909,6 +909,148 @@ test('RA-RC-003: No persisted rider_active_ride_id → no RideProgress navigatio
   expect(NAV.navigate).not.toHaveBeenCalledWith('RideProgress', expect.anything());
 });
 
+// ══════════════════════════════════════════════════════════════════
+// RA-B22: Destination Selection Crash Fix (B.2.2)
+// ══════════════════════════════════════════════════════════════════
+
+// ── RA-B22-001 ─────────────────────────────────────────────────────────────────
+test('RA-B22-001: fitToCoordinates throws (simulated missing Maps API key) → try-catch prevents crash, UI functional', async () => {
+  // Simulate the production APK crash: fitToCoordinates throws because Google Maps SDK
+  // is not initialized (no API key in AndroidManifest). Without the try-catch fix, this
+  // would propagate as a fatal error.
+  const mapMethods = (global as any).mockMapRefMethods;
+  mapMethods.fitToCoordinates.mockImplementationOnce(() => {
+    throw new Error('Maps SDK not initialized — missing API key');
+  });
+
+  (AsyncStorage.getItem as jest.Mock).mockImplementation((key: string) => {
+    if (key === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
+    if (key === 'recent_destinations') return Promise.resolve(JSON.stringify([
+      { name: 'Crash Test Dest', address: 'Crash Test, OH', lat: 39.80, lng: -84.20, savedAt: Date.now() },
+    ]));
+    return Promise.resolve(null);
+  });
+  (global as any).fetch = jest.fn((url: string) => {
+    if (url.includes('nominatim.openstreetmap.org/reverse')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ address: { country_code: 'us' } }) });
+    }
+    if (url.includes('nominatim.openstreetmap.org/search')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    }
+    if (url.includes('router.project-osrm.org')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ routes: [] }) });
+    }
+    if (url.includes('/riders/waiting')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }
+    if (url.includes('/riders/search')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(makeSearchResponse([makeDriver()])) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  });
+
+  const { queryByText } = await render(<HomeScreen navigation={NAV} />);
+  await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+
+  // Tap destination — triggers setSearching(true) → MapView mounts → fitToCoordinates called after 350ms
+  await act(async () => { fireEvent.press(queryByText('Crash Test Dest')!); });
+  // Wait past the 350ms setTimeout to let fitToCoordinates be called (and throw)
+  await act(async () => { await new Promise(r => setTimeout(r, 500)); });
+
+  // App is still functional — drivers shown, not a blank/crashed screen
+  await waitFor(() => {
+    expect(queryByText('2021 Toyota Camry')).toBeTruthy();
+  });
+});
+
+// ── RA-B22-002 ─────────────────────────────────────────────────────────────────
+test('RA-B22-002: Both matching server and contract fail → IIFE .catch() prevents unhandled rejection, shows empty state', async () => {
+  // Simulates: matching server unreachable AND blockchain contract throws.
+  // Without the .catch() on the async IIFE, this creates an unhandled promise rejection
+  // that crashes the Hermes runtime on Android production builds.
+  mockContract.getNodes.mockRejectedValue(new Error('NodeRegistry RPC timeout'));
+  mockContract.getAvailableDrivers.mockRejectedValue(new Error('getAvailableDrivers: call revert'));
+
+  (AsyncStorage.getItem as jest.Mock).mockImplementation((key: string) => {
+    if (key === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
+    if (key === 'recent_destinations') return Promise.resolve(JSON.stringify([
+      { name: 'Fallback Test', address: 'Fallback, OH', lat: 39.79, lng: -84.22, savedAt: Date.now() },
+    ]));
+    return Promise.resolve(null);
+  });
+  (global as any).fetch = jest.fn((url: string) => {
+    if (url.includes('nominatim.openstreetmap.org/reverse')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ address: { country_code: 'us' } }) });
+    }
+    if (url.includes('nominatim.openstreetmap.org/search')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    }
+    if (url.includes('router.project-osrm.org')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ routes: [] }) });
+    }
+    // Server also fails
+    return Promise.reject(new Error('ECONNREFUSED'));
+  });
+
+  const { queryByText } = await render(<HomeScreen navigation={NAV} />);
+  await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+
+  await act(async () => { fireEvent.press(queryByText('Fallback Test')!); });
+  await act(async () => { await new Promise(r => setTimeout(r, 800)); });
+
+  // App survived — shows empty state, not a crash
+  await waitFor(() => {
+    expect(queryByText(/No drivers available nearby/i)).toBeTruthy();
+    expect(queryByText(/Retry/i)).toBeTruthy();
+  });
+});
+
+// ── RA-B22-003 ─────────────────────────────────────────────────────────────────
+test('RA-B22-003: fitToCoordinates called with rider and destination coords after destination select', async () => {
+  const mapMethods = (global as any).mockMapRefMethods;
+  mapMethods.fitToCoordinates.mockClear();
+
+  (AsyncStorage.getItem as jest.Mock).mockImplementation((key: string) => {
+    if (key === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
+    if (key === 'recent_destinations') return Promise.resolve(JSON.stringify([
+      { name: 'Fit Test Dest', address: 'Fit Test, OH', lat: 39.90, lng: -84.30, savedAt: Date.now() },
+    ]));
+    return Promise.resolve(null);
+  });
+  (global as any).fetch = jest.fn((url: string) => {
+    if (url.includes('nominatim.openstreetmap.org/reverse')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ address: { country_code: 'us' } }) });
+    }
+    if (url.includes('nominatim.openstreetmap.org/search')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    }
+    if (url.includes('router.project-osrm.org')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ routes: [] }) });
+    }
+    if (url.includes('/riders')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(makeSearchResponse([makeDriver()])) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  });
+
+  const { queryByText } = await render(<HomeScreen navigation={NAV} />);
+  await act(async () => { await new Promise(r => setTimeout(r, 200)); }); // wait for riderLoc
+
+  await act(async () => { fireEvent.press(queryByText('Fit Test Dest')!); });
+  await act(async () => { await new Promise(r => setTimeout(r, 500)); }); // past the 350ms timeout
+
+  // fitToCoordinates was called with rider coords + destination coords
+  expect(mapMethods.fitToCoordinates).toHaveBeenCalledWith(
+    expect.arrayContaining([
+      expect.objectContaining({ latitude: expect.any(Number), longitude: expect.any(Number) }),
+    ]),
+    expect.objectContaining({ animated: true })
+  );
+  const [[coords]] = mapMethods.fitToCoordinates.mock.calls;
+  // Second coord is the destination (lat: 39.90, lng: -84.30)
+  expect(coords[1]).toEqual(expect.objectContaining({ latitude: 39.90, longitude: -84.30 }));
+});
+
 // ── RA-B7-001 ─────────────────────────────────────────────────────────────────
 test('RA-B7-001: Recent destinations are sorted nearest-first regardless of storage order', async () => {
   // Rider at (39.76, -84.19)

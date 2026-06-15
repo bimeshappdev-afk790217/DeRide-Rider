@@ -381,18 +381,20 @@ export const HomeScreen = ({ navigation }: any) => {
 
   // Fit map to show both pickup and destination after search starts
   useEffect(() => {
-    if (!destCoords || !searching) return;
+    if (!destCoords || !searching || !riderLoc) return;
     const t = setTimeout(() => {
-      mapRef.current?.fitToCoordinates(
-        [
-          { latitude: riderLoc!.lat,   longitude: riderLoc!.lng },
-          { latitude: destCoords.lat, longitude: destCoords.lng },
-        ],
-        { edgePadding: { top: 80, right: 60, bottom: 240, left: 60 }, animated: true }
-      );
+      try {
+        mapRef.current?.fitToCoordinates(
+          [
+            { latitude: riderLoc.lat,  longitude: riderLoc.lng },
+            { latitude: destCoords.lat, longitude: destCoords.lng },
+          ],
+          { edgePadding: { top: 80, right: 60, bottom: 240, left: 60 }, animated: true }
+        );
+      } catch { /* map not initialized — missing API key or Maps SDK not ready */ }
     }, 350);
     return () => clearTimeout(t);
-  }, [destCoords, searching]);
+  }, [destCoords, searching, riderLoc]);
 
   const queryNodesFromRegistry = async (resolved: { lat: number; lng: number }): Promise<boolean> => {
     if (!ALCHEMY_URL || !riderLoc) return false;
@@ -720,7 +722,7 @@ export const HomeScreen = ({ navigation }: any) => {
         setLoading(false);
         await fetchFromContract(resolved);
       });
-    })();
+    })().catch(e => console.warn("[SEARCH] Unhandled search error:", e?.message));
   };
 
   const confirmRide = () => {
