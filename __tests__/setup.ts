@@ -156,11 +156,16 @@ jest.mock('react-native-maps', () => {
   MockMapView.displayName = 'MockMapView';
   MockMapView.Marker   = (props: any) => React.createElement(View, { testID: props.title || 'marker', ...props });
   MockMapView.Polyline = (props: any) => React.createElement(View, { testID: 'polyline', ...props });
+  const MockUrlTile    = (props: any) => React.createElement(View, { testID: props.testID || 'url-tile', ...props });
   return {
     __esModule: true,
     default: MockMapView,
     Marker: MockMapView.Marker,
     Polyline: MockMapView.Polyline,
+    MapUrlTile: MockUrlTile,
+    UrlTile: MockUrlTile,
+    PROVIDER_GOOGLE: 'google',
+    PROVIDER_DEFAULT: undefined,
   };
 });
 

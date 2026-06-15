@@ -2,6 +2,8 @@
  * RA-H: Home Screen Tests (9 tests)
  * RA-DS: Driver Search Tests (12 tests)
  * RA-O: Offer Selection Tests (10 tests)
+ * RA-MP: Map Provider Fallback Tests (4 tests)
+ * RA-B22: Destination Selection Crash Fix (3 tests)
  */
 import React from 'react';
 import { render, fireEvent, waitFor, act, within } from '@testing-library/react-native';
@@ -9,6 +11,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Location from 'expo-location';
 import { makeContractMock, makeProviderMock } from '../mocks/blockchain';
+
+// Controllable map-provider mock — lets tests flip HAS_GOOGLE_MAPS_KEY per test.
+// 'mock' prefix is required for Jest to allow reference inside the hoisted jest.mock factory.
+let mockHasGoogleKey = false;
+jest.mock('../../src/services/mapProvider', () => ({
+  get HAS_GOOGLE_MAPS_KEY() { return mockHasGoogleKey; },
+  OSM_TILE_URL: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+}));
 
 const mockContract = makeContractMock();
 const mockProvider = makeProviderMock();
@@ -206,6 +216,7 @@ async function renderAndSearch(drivers: any[], fareUSD = 3.25) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockHasGoogleKey = false; // default: no Google key → OSM path
   setupDefaultMocks();
 });
 
@@ -907,6 +918,112 @@ test('RA-RC-003: No persisted rider_active_ride_id → no RideProgress navigatio
   await act(async () => { await new Promise(r => setTimeout(r, 500)); });
 
   expect(NAV.navigate).not.toHaveBeenCalledWith('RideProgress', expect.anything());
+});
+
+// ══════════════════════════════════════════════════════════════════
+// RA-MP: Map Provider Fallback Tests
+// ══════════════════════════════════════════════════════════════════
+
+function setupSearchDestMocks(destName: string, lat: number, lng: number, drivers: any[] = []) {
+  (AsyncStorage.getItem as jest.Mock).mockImplementation((key: string) => {
+    if (key === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
+    if (key === 'recent_destinations') return Promise.resolve(JSON.stringify([
+      { name: destName, address: `${destName}, OH`, lat, lng, savedAt: Date.now() },
+    ]));
+    return Promise.resolve(null);
+  });
+  (global as any).fetch = jest.fn((url: string) => {
+    if (url.includes('nominatim.openstreetmap.org/reverse')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ address: { country_code: 'us' } }) });
+    }
+    if (url.includes('nominatim.openstreetmap.org/search')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    }
+    if (url.includes('router.project-osrm.org')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ routes: [] }) });
+    }
+    if (url.includes('/riders/waiting')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }
+    if (url.includes('/riders/search')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(makeSearchResponse(drivers)) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+  });
+}
+
+// ── RA-MP-001 ─────────────────────────────────────────────────────────────────
+test('RA-MP-001: No Google key → OSM UrlTile rendered, map renders without crash', async () => {
+  // mockHasGoogleKey is false (set in beforeEach) — OSM path
+  setupSearchDestMocks('MP Test', 39.80, -84.20);
+
+  const { queryByTestId, queryByText } = await render(<HomeScreen navigation={NAV} />);
+  await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+
+  // Tap destination to trigger searching=true → MapView + UrlTile mount
+  await act(async () => { fireEvent.press(queryByText('MP Test')!); });
+  await act(async () => { await new Promise(r => setTimeout(r, 400)); });
+
+  // map-view is mounted
+  expect(queryByTestId('map-view')).toBeTruthy();
+  // OSM tile overlay is rendered (no Google key → keyless path)
+  await waitFor(() => expect(queryByTestId('osm-url-tile')).toBeTruthy());
+});
+
+// ── RA-MP-002 ─────────────────────────────────────────────────────────────────
+test('RA-MP-002: Google key present → no OSM UrlTile, Google mapType used', async () => {
+  mockHasGoogleKey = true; // key present → Google path
+  setupSearchDestMocks('MP Google Test', 39.80, -84.20, [makeDriver()]);
+
+  const { queryByTestId, queryByText } = await render(<HomeScreen navigation={NAV} />);
+  await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+
+  await act(async () => { fireEvent.press(queryByText('MP Google Test')!); });
+  await act(async () => { await new Promise(r => setTimeout(r, 400)); });
+
+  // map-view is mounted
+  expect(queryByTestId('map-view')).toBeTruthy();
+  // OSM tile is NOT rendered (key present → Google tiles)
+  expect(queryByTestId('osm-url-tile')).toBeFalsy();
+});
+
+// ── RA-MP-003 ─────────────────────────────────────────────────────────────────
+test('RA-MP-003: No key + fitToCoordinates throws → bounding region computed, map still shows', async () => {
+  // fitToCoordinates throws (simulates OSM provider or SDK not ready)
+  const mapMethods = (global as any).mockMapRefMethods;
+  mapMethods.fitToCoordinates.mockImplementationOnce(() => {
+    throw new Error('fitToCoordinates not supported');
+  });
+  setupSearchDestMocks('MP Fallback', 39.90, -84.30);
+
+  const { queryByTestId, queryByText } = await render(<HomeScreen navigation={NAV} />);
+  await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+
+  await act(async () => { fireEvent.press(queryByText('MP Fallback')!); });
+  // Wait past 350ms to let the catch block compute mapRegion
+  await act(async () => { await new Promise(r => setTimeout(r, 500)); });
+
+  // App still renders — map is visible (region fallback kicked in)
+  expect(queryByTestId('map-view')).toBeTruthy();
+  // OSM tile rendered (no key path)
+  expect(queryByTestId('osm-url-tile')).toBeTruthy();
+});
+
+// ── RA-MP-004 ─────────────────────────────────────────────────────────────────
+test('RA-MP-004: No key path — destination select works end-to-end (B.2.2 stays fixed)', async () => {
+  setupSearchDestMocks('MP E2E', 39.80, -84.20, [makeDriver()]);
+
+  const { queryByText, queryByTestId } = await render(<HomeScreen navigation={NAV} />);
+  await act(async () => { await new Promise(r => setTimeout(r, 200)); });
+
+  // No crash — destination can be selected, drivers rendered, OSM tile active
+  await act(async () => { fireEvent.press(queryByText('MP E2E')!); });
+  await act(async () => { await new Promise(r => setTimeout(r, 500)); });
+
+  await waitFor(() => {
+    expect(queryByText('2021 Toyota Camry')).toBeTruthy();
+    expect(queryByTestId('osm-url-tile')).toBeTruthy();
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════

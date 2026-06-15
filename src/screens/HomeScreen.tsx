@@ -6,7 +6,8 @@ import {
 import * as Updates from "expo-updates";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
-import MapView, { Marker, Polyline } from 'react-native-maps';
+import MapView, { Marker, Polyline, MapUrlTile } from 'react-native-maps';
+import { HAS_GOOGLE_MAPS_KEY, OSM_TILE_URL } from '../services/mapProvider';
 import * as Location from 'expo-location';
 import { ethers } from "ethers";
 import { useTheme } from "../theme/ThemeContext";
@@ -205,6 +206,10 @@ export const HomeScreen = ({ navigation }: any) => {
   const nodeAddressRef = useRef<string>("");
   const debounceRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mapRef    = useRef<MapView>(null);
+  const [mapRegion, setMapRegion] = useState<{
+    latitude: number; longitude: number;
+    latitudeDelta: number; longitudeDelta: number;
+  } | null>(null);
   const slideAnim = useRef(new Animated.Value(300)).current;
   const fadeAnim  = useRef(new Animated.Value(0)).current;
 
@@ -379,7 +384,10 @@ export const HomeScreen = ({ navigation }: any) => {
     }
   }, [riderLoc, countryCode]);
 
-  // Fit map to show both pickup and destination after search starts
+  // Fit map to show both pickup and destination after search starts.
+  // Google path: fitToCoordinates() animates natively.
+  // OSM/no-key path: fitToCoordinates() may throw — catch computes a bounding region
+  // from the two points and sets mapRegion state, which drives the controlled region prop.
   useEffect(() => {
     if (!destCoords || !searching || !riderLoc) return;
     const t = setTimeout(() => {
@@ -391,7 +399,13 @@ export const HomeScreen = ({ navigation }: any) => {
           ],
           { edgePadding: { top: 80, right: 60, bottom: 240, left: 60 }, animated: true }
         );
-      } catch { /* map not initialized — missing API key or Maps SDK not ready */ }
+      } catch {
+        const midLat    = (riderLoc.lat + destCoords.lat) / 2;
+        const midLng    = (riderLoc.lng + destCoords.lng) / 2;
+        const deltaLat  = Math.abs(riderLoc.lat - destCoords.lat) * 1.6 + 0.04;
+        const deltaLng  = Math.abs(riderLoc.lng - destCoords.lng) * 1.6 + 0.04;
+        setMapRegion({ latitude: midLat, longitude: midLng, latitudeDelta: deltaLat, longitudeDelta: deltaLng });
+      }
     }, 350);
     return () => clearTimeout(t);
   }, [destCoords, searching, riderLoc]);
@@ -936,13 +950,24 @@ export const HomeScreen = ({ navigation }: any) => {
             <MapView
               ref={mapRef}
               style={StyleSheet.absoluteFillObject}
-              region={{
+              mapType={HAS_GOOGLE_MAPS_KEY ? 'standard' : 'none'}
+              region={mapRegion ?? {
                 latitude:       riderLoc?.lat  ?? 0,
                 longitude:      riderLoc?.lng  ?? 0,
                 latitudeDelta:  0.05,
                 longitudeDelta: 0.05,
               }}
             >
+              {/* OSM tile overlay — active when no Google Maps API key */}
+              {!HAS_GOOGLE_MAPS_KEY && (
+                <MapUrlTile
+                  testID="osm-url-tile"
+                  urlTemplate={OSM_TILE_URL}
+                  maximumZ={19}
+                  flipY={false}
+                  zIndex={-1}
+                />
+              )}
               {/* Blue pin — rider pickup */}
               {riderLoc && (
               <Marker
