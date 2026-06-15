@@ -11,7 +11,7 @@ import { ethers } from "ethers";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 import { postRideRequest, pollForAcceptance, clearRelayMessage, generateRideId } from "../services/api";
-import { addRideToHistory } from "../services/rideHistoryService";
+import { saveRideRecord } from "../services/rideHistoryService";
 import { getPolUsdFromOracle } from "../services/chainlinkOracle";
 import { fetchForexRates, polToLocal, formatLocal } from "../services/currencyService";
 import { WebRTCGPSAnswerer } from "../services/WebRTCGPS";
@@ -78,6 +78,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   const [rideId, setRideId]           = useState<string | null>(null);
   const [pin, setPin]                 = useState<number | null>(null);
   const [txHash, setTxHash]           = useState<string | null>(null);
+  const [fareWeiStr, setFareWeiStr]   = useState<string>("0");
   const [fareUSD, setFareUSD]         = useState(driver.fareUSD ?? 0);
   const [localCurrency, setLocalCurrency] = useState("USD");
   const [polUsdRate,    setPolUsdRate]    = useState<number | null>(null);
@@ -205,8 +206,8 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         if (s === 2) setStatus("pending_confirmation"); // PendingConfirmation
         if (s === 3) { clearInterval(poll); setStatus("disputed"); }             // Disputed
         if (s === 4) { clearInterval(poll); setStatus("escalated"); }            // Escalated
-        if (s === 5) { clearInterval(poll); setStatus("completed"); if (rideId) addRideToHistory(rideId).catch(()=>{}); }            // Completed
-        if (s === 6) { clearInterval(poll); setStatus("cancelled_by_driver"); if (rideId) addRideToHistory(rideId).catch(()=>{}); } // Cancelled (BUG-33 fix)
+        if (s === 5) { clearInterval(poll); setStatus("completed"); if (rideId) saveRideRecord({ rideId, timestamp: Math.floor(Date.now() / 1000), fareWei: fareWeiStr, status: 5, counterparty: driver.address ?? "", offerMultiplier }).catch(() => {}); }            // Completed
+        if (s === 6) { clearInterval(poll); setStatus("cancelled_by_driver"); if (rideId) saveRideRecord({ rideId, timestamp: Math.floor(Date.now() / 1000), fareWei: fareWeiStr, status: 6, counterparty: driver.address ?? "", offerMultiplier }).catch(() => {}); } // Cancelled (BUG-33 fix)
       } catch (e: any) {
         console.warn("[POLL] getRideStatus error:", e.message);
       }
@@ -440,6 +441,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         && BigInt(nodeAddr) > 0xFFFFn;
       const safeNodeAddr = isValidNode ? nodeAddr : ethers.ZeroAddress;
 
+      setFareWeiStr(committedFareWei ?? fareWei);
       let tx: any;
       if (committedFareWei && driverSig) {
         console.log("[ESCROW] createRide (signed):", newRideId.slice(0,10), "committedFareWei:", committedFareWei);
@@ -538,6 +540,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       const tx = await escrow.confirmRide(rideId, routeHash);
       console.log("TX hash:", tx.hash);
       await tx.wait();
+      saveRideRecord({ rideId, txHash: tx.hash, timestamp: Math.floor(Date.now() / 1000), fareWei: fareWeiStr, status: 5, counterparty: driver.address ?? "", offerMultiplier }).catch(() => {});
       setStatus("completed");
     } catch (err: any) {
       Alert.alert("Error", err.message);
@@ -620,7 +623,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
           const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
           const tx = await escrow.cancelRide(rideId);
           await tx.wait();
-          if (rideId) addRideToHistory(rideId).catch(() => {});
+          if (rideId) saveRideRecord({ rideId, txHash: tx.hash, timestamp: Math.floor(Date.now() / 1000), fareWei: fareWeiStr, status: 6, counterparty: driver.address ?? "", offerMultiplier }).catch(() => {});
           const successMsg = variant === "after_window"
             ? "Ride cancelled. A small fee was deducted from your refund."
             : "Your full fare has been refunded.";
@@ -914,6 +917,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
                 </View>
               )}
               <TouchableOpacity
+                testID="cancel-ride-btn"
                 style={[styles.disputeBtn, { borderColor: cancelColor }, actionLoading && { opacity: 0.7 }]}
                 onPress={() => handleCancelRide(cancelVariant)}
                 disabled={actionLoading}

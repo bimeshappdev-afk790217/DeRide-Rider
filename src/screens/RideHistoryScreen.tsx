@@ -1,20 +1,15 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   View, Text, StyleSheet, FlatList,
-  TouchableOpacity, ActivityIndicator,
+  TouchableOpacity, ActivityIndicator, Linking,
 } from "react-native";
 import { ethers } from "ethers";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getPolUsdFromOracle } from "../services/chainlinkOracle";
 import { fetchForexRates, polToLocal, formatLocal } from "../services/currencyService";
-import { getStoredRideIds, scanChainForRideIds } from "../services/rideHistoryService";
+import { getLocalRideHistory, LocalRideRecord } from "../services/rideHistoryService";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors } from "../theme";
-
-
-const GET_RIDE_ABI = [
-  "function getRide(bytes32) external view returns (address,address,address,address,uint256,bytes32,bytes32,bytes32,uint256,uint256,uint8,uint256,uint256,uint256,uint256,uint256,uint256,uint8,address)",
-];
 
 const STATUS_COMPLETED = 5;
 const STATUS_CANCELLED = 6;
@@ -23,34 +18,23 @@ const MULT_LABEL: Record<number, string> = {
   125: "Rush +25%", 150: "Priority +50%", 200: "Emergency 2×",
 };
 
-interface RideEntry {
-  rideId: string;
-  driver: string;
-  fare: bigint;
-  status: number;
-  createdAt: number;
-  offerMultiplier: number;
-}
-
 export const RideHistoryScreen = ({ navigation }: any) => {
   const { colors } = useTheme();
   const PAGE_SIZE = parseInt(process.env.EXPO_PUBLIC_HISTORY_PAGE_SIZE ?? "4", 10);
 
-  const [rides,        setRides]        = useState<RideEntry[]>([]);
+  const [rides,        setRides]        = useState<LocalRideRecord[]>([]);
   const [loading,      setLoading]      = useState(true);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [polUsdRate,   setPolUsdRate]   = useState<number | null>(null);
   const [forexRate,    setForexRate]    = useState<number | null>(null);
   const [currency,     setCurrency]     = useState("USD");
+  const [walletAddr,   setWalletAddr]   = useState<string | null>(null);
 
   const loadHistory = useCallback(async () => {
-    const ESCROW_ADDR  = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS ?? "";
-    const RPC_URL      = process.env.EXPO_PUBLIC_ALCHEMY_URL ?? "";
-    const START_BLOCK  = parseInt(process.env.EXPO_PUBLIC_HISTORY_START_BLOCK ?? "88470000", 10);
     setLoading(true);
     try {
       const riderAddr = await AsyncStorage.getItem("rider_wallet_address");
-      if (!riderAddr || !ESCROW_ADDR || !RPC_URL) { setLoading(false); return; }
+      setWalletAddr(riderAddr);
 
       const cur = await AsyncStorage.getItem("app_currency") ?? "USD";
       setCurrency(cur);
@@ -64,37 +48,8 @@ export const RideHistoryScreen = ({ navigation }: any) => {
         setForexRate(rates.value[cur]);
       }
 
-      // Chain scan (source of truth) + local cache merged, deduplicated
-      const [chainIds, storedIds] = await Promise.all([
-        scanChainForRideIds(riderAddr, "rider", ESCROW_ADDR, START_BLOCK),
-        getStoredRideIds(),
-      ]);
-      const allIds = [...new Set([...chainIds, ...storedIds])];
-      if (allIds.length === 0) { setLoading(false); return; }
-
-      const provider = new ethers.JsonRpcProvider(RPC_URL);
-      const contract = new ethers.Contract(ESCROW_ADDR, GET_RIDE_ABI, provider);
-      const results  = await Promise.allSettled(allIds.map(id => contract.getRide(id)));
-
-      const entries: RideEntry[] = [];
-      for (let i = 0; i < results.length; i++) {
-        const r = results[i];
-        if (r.status !== "fulfilled") continue;
-        const d      = r.value;
-        const status = Number(d[10]);
-        if (status !== STATUS_COMPLETED && status !== STATUS_CANCELLED) continue;
-        if ((d[0] as string).toLowerCase() !== riderAddr.toLowerCase()) continue;
-        entries.push({
-          rideId:          allIds[i],
-          driver:          d[1] as string,
-          fare:            d[4] as bigint,
-          status,
-          createdAt:       Number(d[11]),
-          offerMultiplier: Number(d[17]),
-        });
-      }
-
-      setRides(entries.sort((a, b) => b.createdAt - a.createdAt));
+      const records = await getLocalRideHistory();
+      setRides(records);
       setVisibleCount(PAGE_SIZE);
     } catch (e: any) {
       console.warn("[RideHistory] load error:", e.message);
@@ -105,28 +60,28 @@ export const RideHistoryScreen = ({ navigation }: any) => {
 
   useEffect(() => { loadHistory(); }, [loadHistory]);
 
-  const renderFarePol = (fareWei: bigint) => {
-    const pol = parseFloat(ethers.formatEther(fareWei));
+  const renderFarePol = (fareWei: string) => {
+    const pol = parseFloat(ethers.formatEther(BigInt(fareWei)));
     return `${pol.toFixed(4)} POL`;
   };
 
-  const renderFareLocal = (fareWei: bigint) => {
-    const pol = parseFloat(ethers.formatEther(fareWei));
+  const renderFareLocal = (fareWei: string) => {
+    const pol = parseFloat(ethers.formatEther(BigInt(fareWei)));
     if (polUsdRate === null || forexRate === null) return null;
     return formatLocal(polToLocal(pol, polUsdRate, forexRate), currency);
   };
 
-  const renderItem = ({ item, index }: { item: RideEntry; index: number }) => {
+  const renderItem = ({ item, index }: { item: LocalRideRecord; index: number }) => {
     const isCompleted = item.status === STATUS_COMPLETED;
-    const dateStr = item.createdAt > 0
-      ? new Date(item.createdAt * 1000).toLocaleDateString() + " " +
-        new Date(item.createdAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    const dateStr = item.timestamp > 0
+      ? new Date(item.timestamp * 1000).toLocaleDateString() + " " +
+        new Date(item.timestamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
       : "Unknown date";
-    const counterparty = item.driver && item.driver !== ("0x" + "0".repeat(40))
-      ? `${item.driver.slice(0, 8)}…${item.driver.slice(-4)}`
+    const counterparty = item.counterparty && item.counterparty !== ("0x" + "0".repeat(40))
+      ? `${item.counterparty.slice(0, 8)}…${item.counterparty.slice(-4)}`
       : "—";
-    const localFare = renderFareLocal(item.fare);
-    const polFare   = renderFarePol(item.fare);
+    const localFare = renderFareLocal(item.fareWei);
+    const polFare   = renderFarePol(item.fareWei);
 
     return (
       <View
@@ -201,10 +156,20 @@ export const RideHistoryScreen = ({ navigation }: any) => {
           <Text style={[styles.heading, { color: colors.text }]}>Ride History</Text>
         }
         ListEmptyComponent={
-          <View style={styles.emptyWrap}>
-            <Text style={{ color: colors.textSub, fontSize: 16 }} testID="empty-state">
-              No past rides yet.
+          <View style={styles.emptyWrap} testID="empty-state">
+            <Text style={{ color: colors.textSub, fontSize: 16, marginBottom: 12 }}>
+              No local ride history on this device.
             </Text>
+            {walletAddr ? (
+              <TouchableOpacity
+                testID="polygonscan-link"
+                onPress={() => Linking.openURL(`https://polygonscan.com/address/${walletAddr}`)}
+              >
+                <Text style={{ color: Colors.brand, fontSize: 14, textDecorationLine: "underline" }}>
+                  View your full history on PolygonScan →
+                </Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         }
         ListFooterComponent={

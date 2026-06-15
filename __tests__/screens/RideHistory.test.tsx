@@ -1,16 +1,6 @@
 /**
- * RA-B16: Rider ride history tests — chain scan + AsyncStorage merge
+ * RA-B16: Rider ride history tests — local self-recording model
  */
-
-const mockGetRide = jest.fn();
-
-jest.mock('ethers', () => {
-  const actual = jest.requireActual('ethers');
-  const ContractMock = jest.fn(() => ({ getRide: mockGetRide }));
-  const ProviderMock = jest.fn(() => ({}));
-  const ns = { ...actual.ethers, Contract: ContractMock, JsonRpcProvider: ProviderMock };
-  return { ...actual, ethers: ns, Contract: ContractMock, JsonRpcProvider: ProviderMock };
-});
 
 jest.mock('../../src/services/currencyService', () => ({
   fetchForexRates: jest.fn().mockResolvedValue({ USD: 1.0 }),
@@ -24,9 +14,8 @@ jest.mock('../../src/services/chainlinkOracle', () => ({
 }));
 
 jest.mock('../../src/services/rideHistoryService', () => ({
-  getStoredRideIds: jest.fn(),
-  addRideToHistory: jest.fn().mockResolvedValue(undefined),
-  scanChainForRideIds: jest.fn(),
+  getLocalRideHistory: jest.fn(),
+  saveRideRecord: jest.fn().mockResolvedValue(undefined),
 }));
 
 import React from 'react';
@@ -34,45 +23,34 @@ import { render, fireEvent, waitFor, within } from '@testing-library/react-nativ
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { RideHistoryScreen } from '../../src/screens/RideHistoryScreen';
 import * as rideHistorySvc from '../../src/services/rideHistoryService';
+import { LocalRideRecord } from '../../src/services/rideHistoryService';
 
-const mockGetStoredRideIds    = rideHistorySvc.getStoredRideIds as jest.Mock;
-const mockScanChainForRideIds = rideHistorySvc.scanChainForRideIds as jest.Mock;
+const mockGetLocalRideHistory = rideHistorySvc.getLocalRideHistory as jest.Mock;
 
 const NAV        = { navigate: jest.fn(), goBack: jest.fn(), addListener: jest.fn(() => () => {}) };
 const RIDER_ADDR = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const DRIVER_ADDR= '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const NOW        = Math.floor(Date.now() / 1000);
 
-// 19-element array matching the RideEscrow Ride struct
-const makeFakeRide = (
-  status: number,
-  createdAt: number,
-  fare = BigInt('1000000000000000000'), // 1 POL
+const makeRecord = (
+  n: number,
+  status: 5 | 6 = 5,
+  fareWei = '1000000000000000000', // 1 POL
+  timestamp = NOW - n * 3600,
   offerMultiplier = 100,
-) => [
-  RIDER_ADDR,                      // 0: rider
-  DRIVER_ADDR,                     // 1: driver
-  '0x' + '0'.repeat(40),           // 2: nodeAddress
-  '0x' + '0'.repeat(40),           // 3: arbitrator
-  fare,                            // 4: fare
-  '0x' + '0'.repeat(64),           // 5: pinHash
-  '0x' + '0'.repeat(64),           // 6: routeHash
-  '0x' + '0'.repeat(64),           // 7: riderRouteHash
-  0n,                              // 8: distanceKm
-  0n,                              // 9: durationSecs
-  BigInt(status),                  // 10: status
-  BigInt(createdAt),               // 11: createdAt
-  0n, 0n, 0n, 0n, 0n,             // 12-16
-  BigInt(offerMultiplier),         // 17: offerMultiplier
-  '0x' + '0'.repeat(40),           // 18: rideVerifier
-];
+): LocalRideRecord => ({
+  rideId:          '0x' + String(n).padStart(64, '0'),
+  timestamp,
+  fareWei,
+  status,
+  counterparty:    DRIVER_ADDR,
+  offerMultiplier,
+});
 
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.EXPO_PUBLIC_HISTORY_PAGE_SIZE = '4';
-  mockGetStoredRideIds.mockResolvedValue([]);
-  mockScanChainForRideIds.mockResolvedValue([]);
-  mockGetRide.mockResolvedValue(makeFakeRide(5, NOW - 3600));
+  mockGetLocalRideHistory.mockResolvedValue([]);
   (AsyncStorage.getItem as jest.Mock).mockImplementation((k: string) => {
     if (k === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
     if (k === 'app_currency') return Promise.resolve('USD');
@@ -85,59 +63,43 @@ afterAll(() => {
 });
 
 // ── RA-B16-001 ─────────────────────────────────────────────────────────────────
-test('RA-B16-001: calls scanChainForRideIds (chain is source of truth)', async () => {
-  mockScanChainForRideIds.mockResolvedValue(['0x' + '1'.repeat(64)]);
+test('RA-B16-001: reads from getLocalRideHistory (no chain scan)', async () => {
+  mockGetLocalRideHistory.mockResolvedValue([makeRecord(1)]);
   await render(<RideHistoryScreen navigation={NAV} />);
-  await waitFor(() => expect(mockScanChainForRideIds).toHaveBeenCalledWith(
-    RIDER_ADDR, 'rider', expect.any(String), expect.any(Number)
-  ), { timeout: 4000 });
-  expect(mockGetRide).toHaveBeenCalledWith('0x' + '1'.repeat(64));
+  await waitFor(() => expect(mockGetLocalRideHistory).toHaveBeenCalledTimes(1), { timeout: 4000 });
 });
 
 // ── RA-B16-002 ─────────────────────────────────────────────────────────────────
-test('RA-B16-002: only Completed (5) and Cancelled (6) rides shown; in-progress excluded', async () => {
-  const rideCompleted  = '0x' + '1'.repeat(64);
-  const rideCancelled  = '0x' + '2'.repeat(64);
-  const rideInProgress = '0x' + '3'.repeat(64);
-
-  mockScanChainForRideIds.mockResolvedValue([rideCompleted, rideCancelled, rideInProgress]);
-  mockGetRide
-    .mockResolvedValueOnce(makeFakeRide(5, NOW - 3600)) // Completed
-    .mockResolvedValueOnce(makeFakeRide(6, NOW - 7200)) // Cancelled
-    .mockResolvedValueOnce(makeFakeRide(1, NOW - 1800)); // InProgress — excluded
-
-  const { getByTestId, queryByTestId } = await render(<RideHistoryScreen navigation={NAV} />);
-  await waitFor(() => expect(getByTestId('history-item-0')).toBeTruthy(), { timeout: 4000 });
-  expect(getByTestId('history-item-1')).toBeTruthy();
-  expect(queryByTestId('history-item-2')).toBeNull(); // in-progress excluded
+test('RA-B16-002: Completed shows "Completed" badge; Cancelled shows "Cancelled" badge', async () => {
+  mockGetLocalRideHistory.mockResolvedValue([
+    makeRecord(1, 5),
+    makeRecord(2, 6),
+  ]);
+  const { getAllByText } = await render(<RideHistoryScreen navigation={NAV} />);
+  await waitFor(() => {
+    expect(getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
+    expect(getAllByText('Cancelled').length).toBeGreaterThanOrEqual(1);
+  }, { timeout: 4000 });
 });
 
 // ── RA-B16-003 ─────────────────────────────────────────────────────────────────
-test('RA-B16-003: rides displayed newest-first regardless of storage order', async () => {
-  const olderRideId = '0x' + '1'.repeat(64);
-  const newerRideId = '0x' + '2'.repeat(64);
-
-  mockScanChainForRideIds.mockResolvedValue([olderRideId, newerRideId]);
-  mockGetRide
-    .mockResolvedValueOnce(makeFakeRide(5, NOW - 7200, BigInt('1000000000000000000')))  // older, 1 POL
-    .mockResolvedValueOnce(makeFakeRide(5, NOW - 3600, BigInt('2000000000000000000'))); // newer, 2 POL
-
+test('RA-B16-003: records displayed newest-first (service order preserved)', async () => {
+  mockGetLocalRideHistory.mockResolvedValue([
+    makeRecord(1, 5, '2000000000000000000', NOW - 3600),  // newer, 2 POL → $1.00
+    makeRecord(2, 5, '1000000000000000000', NOW - 7200),  // older, 1 POL → $0.50
+  ]);
   const { getAllByTestId } = await render(<RideHistoryScreen navigation={NAV} />);
   await waitFor(() => expect(getAllByTestId(/^history-item-/).length).toBeGreaterThanOrEqual(2), { timeout: 4000 });
-
   const items = getAllByTestId(/^history-item-/);
-  expect(within(items[0]).getAllByText('$1.00').length).toBeGreaterThan(0);
+  expect(within(items[0]).getAllByText('$1.00').length).toBeGreaterThan(0); // 2 POL × $0.50 = $1.00
 });
 
-// ── RA-B16-004 ─────────────────────────────────────────────────────────────────
+// ── RA-B16-004a ────────────────────────────────────────────────────────────────
 test('RA-B16-004a: PAGE_SIZE=4 shows first 4 of 6 rides; load-more reveals the rest', async () => {
   process.env.EXPO_PUBLIC_HISTORY_PAGE_SIZE = '4';
-  const rideIds = Array.from({ length: 6 }, (_, i) => '0x' + String(i + 1).padStart(64, '0'));
-  mockScanChainForRideIds.mockResolvedValue(rideIds);
-  rideIds.forEach((_, i) => {
-    mockGetRide.mockResolvedValueOnce(makeFakeRide(5, NOW - (i + 1) * 600));
-  });
-
+  mockGetLocalRideHistory.mockResolvedValue(
+    Array.from({ length: 6 }, (_, i) => makeRecord(i + 1, 5, '1000000000000000000', NOW - (i + 1) * 600)),
+  );
   const { getByTestId, queryByTestId } = await render(<RideHistoryScreen navigation={NAV} />);
   await waitFor(() => expect(getByTestId('history-item-0')).toBeTruthy(), { timeout: 4000 });
   expect(getByTestId('history-item-3')).toBeTruthy();
@@ -149,14 +111,12 @@ test('RA-B16-004a: PAGE_SIZE=4 shows first 4 of 6 rides; load-more reveals the r
   expect(getByTestId('history-item-5')).toBeTruthy();
 });
 
-test('RA-B16-004b: PAGE_SIZE=10 shows all 6 rides without a load-more button', async () => {
+// ── RA-B16-004b ────────────────────────────────────────────────────────────────
+test('RA-B16-004b: PAGE_SIZE=10 shows all 6 rides without load-more', async () => {
   process.env.EXPO_PUBLIC_HISTORY_PAGE_SIZE = '10';
-  const rideIds = Array.from({ length: 6 }, (_, i) => '0x' + String(i + 1).padStart(64, '0'));
-  mockScanChainForRideIds.mockResolvedValue(rideIds);
-  rideIds.forEach((_, i) => {
-    mockGetRide.mockResolvedValueOnce(makeFakeRide(5, NOW - (i + 1) * 600));
-  });
-
+  mockGetLocalRideHistory.mockResolvedValue(
+    Array.from({ length: 6 }, (_, i) => makeRecord(i + 1, 5, '1000000000000000000', NOW - (i + 1) * 600)),
+  );
   const { getByTestId, queryByTestId } = await render(<RideHistoryScreen navigation={NAV} />);
   await waitFor(() => expect(getByTestId('history-item-5')).toBeTruthy(), { timeout: 4000 });
   expect(queryByTestId('load-more-btn')).toBeNull();
@@ -164,13 +124,12 @@ test('RA-B16-004b: PAGE_SIZE=10 shows all 6 rides without a load-more button', a
 });
 
 // ── RA-B16-005 ─────────────────────────────────────────────────────────────────
-test('RA-B16-005: per-ride card shows local value as fare hero + POL muted; "Completed" status', async () => {
-  mockScanChainForRideIds.mockResolvedValue(['0x' + '1'.repeat(64)]);
-  mockGetRide.mockResolvedValue(makeFakeRide(5, NOW - 3600, BigInt('1000000000000000000')));
-
+test('RA-B16-005: fare display from fareWei — 1 POL at $0.50 shows $0.50', async () => {
+  mockGetLocalRideHistory.mockResolvedValue([
+    makeRecord(1, 5, '1000000000000000000'), // 1 POL
+  ]);
   const { getByTestId, getAllByText } = await render(<RideHistoryScreen navigation={NAV} />);
   await waitFor(() => expect(getByTestId('history-item-0')).toBeTruthy(), { timeout: 4000 });
-
   expect(getByTestId('fare-local-hero')).toBeTruthy();
   expect(getAllByText('$0.50').length).toBeGreaterThanOrEqual(1);
   expect(getAllByText('1.0000 POL').length).toBeGreaterThanOrEqual(1);
@@ -178,9 +137,9 @@ test('RA-B16-005: per-ride card shows local value as fare hero + POL muted; "Com
 });
 
 // ── RA-B16-006 ─────────────────────────────────────────────────────────────────
-test('RA-B16-006: empty state when chain and storage both empty', async () => {
-  mockScanChainForRideIds.mockResolvedValue([]);
-  mockGetStoredRideIds.mockResolvedValue([]);
+test('RA-B16-006: empty state shows PolygonScan link with rider address', async () => {
+  mockGetLocalRideHistory.mockResolvedValue([]);
   const { getByTestId } = await render(<RideHistoryScreen navigation={NAV} />);
   await waitFor(() => expect(getByTestId('empty-state')).toBeTruthy(), { timeout: 4000 });
+  expect(getByTestId('polygonscan-link')).toBeTruthy();
 });

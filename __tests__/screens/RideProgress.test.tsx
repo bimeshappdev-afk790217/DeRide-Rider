@@ -60,6 +60,10 @@ jest.mock('ethers', () => {
   };
 });
 
+jest.mock('../../src/services/rideHistoryService', () => ({
+  saveRideRecord: jest.fn().mockResolvedValue(undefined),
+}));
+
 jest.mock('../../src/services/api', () => ({
   postRideRequest:   jest.fn(() => Promise.resolve()),
   pollForAcceptance: jest.fn(() => Promise.resolve(null)),
@@ -73,6 +77,9 @@ jest.mock('../../src/services/chainlinkOracle', () => ({
 
 import { RideProgressScreen } from '../../src/screens/RideProgressScreen';
 import * as relayApi from '../../src/services/api';
+import * as rideHistorySvc from '../../src/services/rideHistoryService';
+
+const mockSaveRideRecord = rideHistorySvc.saveRideRecord as jest.Mock;
 
 const RIDER_ADDR = '0x' + 'a'.repeat(40);
 const DRIVER_ADDR = '0x' + 'b'.repeat(40);
@@ -946,6 +953,108 @@ test('RA-B-014: Relay path — insufficient balance shows local-currency primary
 
   expect(relayApi.postRideRequest).not.toHaveBeenCalled();
 });
+
+// ── RA-B16-T04 ────────────────────────────────────────────────────────────────
+// Placed BEFORE RA-RP-023 (and before T01) — RA-RP-023's jest.useFakeTimers()
+// leaves lingering async state that corrupts Alert dispatch and renderWaitingPickup.
+test('RA-B16-T04: cancelRide → saveRideRecord with status=6 and txHash', async () => {
+  // Use mockAlert directly (bottom of the spy chain) — immune to jest.spyOn stacking
+  // from pre-existing tests that call jest.spyOn(Alert, 'alert') without restoring.
+  const alertMock = (global as any).mockAlert.alert as jest.Mock;
+  mockContract.cancelRide.mockResolvedValue(mockTx);
+  const { getByTestId } = await renderWaitingPickup();
+
+  // Press the TouchableOpacity directly (testID="cancel-ride-btn") to avoid
+  // fireEvent bubbling uncertainty when targeting a child Text element.
+  await waitFor(() => expect(getByTestId('cancel-ride-btn')).toBeTruthy(), { timeout: 3000 });
+  await act(async () => { fireEvent.press(getByTestId('cancel-ride-btn')); });
+
+  await waitFor(() => {
+    expect(alertMock).toHaveBeenCalledWith(
+      expect.stringMatching(/Cancel Ride/i),
+      expect.any(String),
+      expect.any(Array)
+    );
+  });
+  const cancelCall = alertMock.mock.calls.find((c: any[]) => String(c[0]).match(/Cancel Ride/i));
+  const cancelBtn  = (cancelCall![2] as any[]).find((b: any) => b.text && String(b.text).match(/Cancel/i) && b.style === 'destructive');
+  await act(async () => { cancelBtn?.onPress?.(); });
+
+  await waitFor(() => {
+    expect(mockSaveRideRecord).toHaveBeenCalledWith(expect.objectContaining({
+      txHash: mockTx.hash,
+      status: 6,
+    }));
+  }, { timeout: 8000 });
+}, 15000);
+
+// ── RA-B16-T01 ────────────────────────────────────────────────────────────────
+// Poll interval is 5s — test needs time budget beyond the default 5s Jest timeout
+test('RA-B16-T01: poll=5 (Completed) → saveRideRecord called with status=5 and driver as counterparty', async () => {
+  mockContract.getRideStatus.mockResolvedValue(5n);
+  await renderWaitingPickup();
+  await waitFor(() => {
+    expect(mockSaveRideRecord).toHaveBeenCalledWith(expect.objectContaining({
+      status:          5,
+      counterparty:    DRIVER_ADDR,
+      offerMultiplier: 100,
+    }));
+  }, { timeout: 12000 });
+}, 15000);
+
+// ── RA-B16-T02 ────────────────────────────────────────────────────────────────
+// Uses resumedRideId path (bypasses createEscrowRide) to avoid post-T01 async
+// state contamination that makes renderWaitingPickup unreliable after T01's 5s wait.
+test('RA-B16-T02: poll=6 (Driver cancelled) → saveRideRecord called with status=6', async () => {
+  // Resume path: first getRideStatus call (in resume IIFE) returns 0 → waiting_pickup,
+  // then poll fires at 5s and gets 6 → saveRideRecord(status=6).
+  mockContract.getRideStatus.mockResolvedValueOnce(0n).mockResolvedValue(6n);
+  const params = {
+    resumedRideId: RIDE_ID,
+    driver:        { address: DRIVER_ADDR },
+    offerMultiplier: 100,
+    destination:   'Dayton Mall',
+    pickupLat: '39.7589', pickupLng: '-84.1916',
+    destLat:   '39.7900', destLng:   '-84.2200',
+    nodeAddress: NODE_ADDR,
+  };
+  render(<RideProgressScreen route={{ params }} navigation={NAV} />);
+  await waitFor(() => {
+    expect(mockSaveRideRecord).toHaveBeenCalledWith(expect.objectContaining({
+      status:       6,
+      counterparty: DRIVER_ADDR,
+    }));
+  }, { timeout: 12000 });
+}, 15000);
+
+// ── RA-B16-T03 ────────────────────────────────────────────────────────────────
+// Uses resumedRideId path with status=2 (pending_confirmation) — immune to post-T01 contamination.
+test('RA-B16-T03: confirmRide → saveRideRecord with status=5 and txHash', async () => {
+  // Resume path: getRideStatus returns 2 → component sets status="pending_confirmation".
+  mockContract.getRideStatus.mockResolvedValue(2n);
+  mockContract.confirmRide.mockResolvedValue(mockTx);
+  const params = {
+    resumedRideId: RIDE_ID,
+    driver:        { address: DRIVER_ADDR },
+    offerMultiplier: 100,
+    destination:   'Dayton Mall',
+    pickupLat: '39.7589', pickupLng: '-84.1916',
+    destLat:   '39.7900', destLng:   '-84.2200',
+    nodeAddress: NODE_ADDR,
+  };
+  const { getByText } = await render(<RideProgressScreen route={{ params }} navigation={NAV} />);
+
+  await waitFor(() => expect(getByText('Confirm Ride ✓')).toBeTruthy(), { timeout: 5000 });
+
+  await act(async () => { fireEvent.press(getByText('Confirm Ride ✓')); });
+
+  await waitFor(() => {
+    expect(mockSaveRideRecord).toHaveBeenCalledWith(expect.objectContaining({
+      txHash: mockTx.hash,
+      status: 5,
+    }));
+  }, { timeout: 8000 });
+}, 15000);
 
 // ── RA-RP-023 ─────────────────────────────────────────────────────────────────
 // Use fake timers so both Date.now() and setInterval are controlled together.
