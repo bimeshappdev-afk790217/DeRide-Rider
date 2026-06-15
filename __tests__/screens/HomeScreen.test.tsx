@@ -857,3 +857,54 @@ test('RA-DS-012: Server returns empty drivers → rider falls back to blockchain
     expect(queryByText(/Kia EV6 Blockchain/i)).toBeTruthy();
   }, { timeout: 4000 });
 });
+
+// ══════════════════════════════════════════════════════════════════
+// RA-RC: Rider Active Ride Recovery Tests
+// ══════════════════════════════════════════════════════════════════
+
+const RIDE_ID_RC = '0x' + 'e'.repeat(64);
+
+// ── RA-RC-001 ─────────────────────────────────────────────────────────────────
+test('RA-RC-001: rider_active_ride_id + non-terminal on-chain → navigate to RideProgress', async () => {
+  (AsyncStorage.getItem as jest.Mock).mockImplementation((k: string) => {
+    if (k === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
+    if (k === 'rider_active_ride_id') return Promise.resolve(RIDE_ID_RC);
+    return Promise.resolve(null);
+  });
+  mockContract.getRideStatus.mockResolvedValue(1n); // InProgress — non-terminal
+
+  await render(<HomeScreen navigation={NAV} />);
+
+  await waitFor(() => {
+    expect(NAV.navigate).toHaveBeenCalledWith('RideProgress', { resumedRideId: RIDE_ID_RC });
+  }, { timeout: 5000 });
+});
+
+// ── RA-RC-002 ─────────────────────────────────────────────────────────────────
+test('RA-RC-002: rider_active_ride_id + Completed on-chain (s=5) → clear storage, no navigation', async () => {
+  (AsyncStorage.getItem as jest.Mock).mockImplementation((k: string) => {
+    if (k === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
+    if (k === 'rider_active_ride_id') return Promise.resolve(RIDE_ID_RC);
+    return Promise.resolve(null);
+  });
+  mockContract.getRideStatus.mockResolvedValue(5n); // Completed
+
+  await render(<HomeScreen navigation={NAV} />);
+  await act(async () => { await new Promise(r => setTimeout(r, 500)); });
+
+  expect(AsyncStorage.removeItem).toHaveBeenCalledWith('rider_active_ride_id');
+  expect(NAV.navigate).not.toHaveBeenCalledWith('RideProgress', expect.anything());
+});
+
+// ── RA-RC-003 ─────────────────────────────────────────────────────────────────
+test('RA-RC-003: No persisted rider_active_ride_id → no RideProgress navigation on launch', async () => {
+  (AsyncStorage.getItem as jest.Mock).mockImplementation((k: string) => {
+    if (k === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
+    return Promise.resolve(null); // no rider_active_ride_id
+  });
+
+  await render(<HomeScreen navigation={NAV} />);
+  await act(async () => { await new Promise(r => setTimeout(r, 500)); });
+
+  expect(NAV.navigate).not.toHaveBeenCalledWith('RideProgress', expect.anything());
+});

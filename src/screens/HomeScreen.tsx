@@ -276,6 +276,25 @@ export const HomeScreen = ({ navigation }: any) => {
     AsyncStorage.getItem(RECENT_DESTS_KEY).then(raw => {
       if (raw) setRecentDests(JSON.parse(raw));
     }).catch(() => {});
+    // Recover active ride after reload: if a rideId was persisted and is still
+    // non-terminal on-chain, navigate back to RideProgress so rider can interact.
+    (async () => {
+      try {
+        const savedRideId = await AsyncStorage.getItem("rider_active_ride_id");
+        if (!savedRideId) return;
+        const provider = new ethers.JsonRpcProvider(ALCHEMY_URL);
+        const escrow   = new ethers.Contract(RIDE_ESCROW, ["function getRideStatus(bytes32) external view returns (uint8)"], provider);
+        const s = Number(await escrow.getRideStatus(savedRideId));
+        if (s >= 5) {
+          await AsyncStorage.removeItem("rider_active_ride_id");
+          return;
+        }
+        console.log("[RECOVER] Active ride found on-chain:", savedRideId.slice(0, 10), "status:", s);
+        navigation.navigate("RideProgress", { resumedRideId: savedRideId });
+      } catch (e: any) {
+        console.warn("[RECOVER] rider active-ride check failed:", e.message);
+      }
+    })();
     (async () => {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();

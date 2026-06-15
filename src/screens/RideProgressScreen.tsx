@@ -51,7 +51,7 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
 export const RideProgressScreen = ({ route, navigation }: any) => {
   const { colors } = useTheme();
   const _p = route.params;
-  const driver          = _p.driver;
+  const driver          = _p.driver ?? {};   // undefined on resume path
   const destination     = _p.destination;
   const pickupLat       = parseFloat(_p.pickupLat);
   const pickupLng       = parseFloat(_p.pickupLng);
@@ -99,10 +99,43 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
   const gpsLogRef            = useRef<Array<{ lat: number; lng: number; ts: number }>>([]);
   const [usingWebRTC, setUsingWebRTC] = useState(false);
 
+  // Clear persisted rideId when ride reaches a terminal state
+  useEffect(() => {
+    const terminal = ["completed", "cancelled_by_driver", "failed", "declined_pre_escrow"];
+    if (terminal.includes(status)) {
+      AsyncStorage.removeItem("rider_active_ride_id").catch(() => {});
+    }
+  }, [status]);
+
   useEffect(() => {
     console.log("RideProgress mounted");
     console.log("Params:", JSON.stringify(route.params));
     Animated.timing(fadeAnim, { toValue: 1, duration: 500, useNativeDriver: true }).start();
+    // Resume path: HomeScreen found an active ride on-chain and passed resumedRideId
+    if (_p.resumedRideId) {
+      (async () => {
+        try {
+          const addr = await AsyncStorage.getItem("rider_wallet_address") ?? "";
+          const key  = await SecureStore.getItemAsync("rider_wallet_key")  ?? "";
+          riderWalletRef.current = addr;
+          privateKeyRef.current  = key;
+          const provider = new ethers.JsonRpcProvider(POLYGON_RPC);
+          const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, provider);
+          const s = Number(await escrow.getRideStatus(_p.resumedRideId));
+          const statusMap: Record<number, Status> = {
+            0: "waiting_pickup", 1: "driver_arriving",
+            2: "pending_confirmation", 3: "disputed", 4: "escalated",
+          };
+          setRideId(_p.resumedRideId);
+          setStatus(statusMap[s] ?? "failed");
+          console.log("[RESUME] Restored ride", _p.resumedRideId.slice(0, 10), "→ status", s);
+        } catch (e: any) {
+          console.warn("[RESUME] failed:", e.message);
+          setStatus("failed");
+        }
+      })();
+      return;
+    }
     loadWalletAndStart();
     (async () => {
       try {
@@ -437,6 +470,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       console.log("[ESCROW] createRide confirmed, PIN:", newPin);
 
       setRideId(newRideId);
+      AsyncStorage.setItem("rider_active_ride_id", newRideId).catch(() => {});
       setPin(newPin);
       setTxHash(tx.hash);
       setWaitingPickupAt(Date.now());
@@ -665,6 +699,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
       // Generate rideId upfront so we can verify acceptance matches this exact ride
       const newRideId = await generateRideId();
       setRideId(newRideId); // set early so WS effect connects
+      AsyncStorage.setItem("rider_active_ride_id", newRideId).catch(() => {});
 
       console.log("[RELAY] Posting ride request to driver:", driverAddr.slice(0, 10));
       await postRideRequest(
