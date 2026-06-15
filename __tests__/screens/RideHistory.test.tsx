@@ -1,5 +1,5 @@
 /**
- * RA-B16: Rider ride history tests — AsyncStorage-based (no eth_getLogs)
+ * RA-B16: Rider ride history tests — chain scan + AsyncStorage merge
  */
 
 const mockGetRide = jest.fn();
@@ -26,6 +26,7 @@ jest.mock('../../src/services/chainlinkOracle', () => ({
 jest.mock('../../src/services/rideHistoryService', () => ({
   getStoredRideIds: jest.fn(),
   addRideToHistory: jest.fn().mockResolvedValue(undefined),
+  scanChainForRideIds: jest.fn(),
 }));
 
 import React from 'react';
@@ -34,7 +35,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { RideHistoryScreen } from '../../src/screens/RideHistoryScreen';
 import * as rideHistorySvc from '../../src/services/rideHistoryService';
 
-const mockGetStoredRideIds = rideHistorySvc.getStoredRideIds as jest.Mock;
+const mockGetStoredRideIds    = rideHistorySvc.getStoredRideIds as jest.Mock;
+const mockScanChainForRideIds = rideHistorySvc.scanChainForRideIds as jest.Mock;
 
 const NAV        = { navigate: jest.fn(), goBack: jest.fn(), addListener: jest.fn(() => () => {}) };
 const RIDER_ADDR = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -69,6 +71,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   process.env.EXPO_PUBLIC_HISTORY_PAGE_SIZE = '4';
   mockGetStoredRideIds.mockResolvedValue([]);
+  mockScanChainForRideIds.mockResolvedValue([]);
   mockGetRide.mockResolvedValue(makeFakeRide(5, NOW - 3600));
   (AsyncStorage.getItem as jest.Mock).mockImplementation((k: string) => {
     if (k === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
@@ -82,10 +85,12 @@ afterAll(() => {
 });
 
 // ── RA-B16-001 ─────────────────────────────────────────────────────────────────
-test('RA-B16-001: reads ride IDs from rideHistoryService (AsyncStorage), not eth_getLogs', async () => {
-  mockGetStoredRideIds.mockResolvedValue(['0x' + '1'.repeat(64)]);
+test('RA-B16-001: calls scanChainForRideIds (chain is source of truth)', async () => {
+  mockScanChainForRideIds.mockResolvedValue(['0x' + '1'.repeat(64)]);
   await render(<RideHistoryScreen navigation={NAV} />);
-  await waitFor(() => expect(mockGetStoredRideIds).toHaveBeenCalled(), { timeout: 4000 });
+  await waitFor(() => expect(mockScanChainForRideIds).toHaveBeenCalledWith(
+    RIDER_ADDR, 'rider', expect.any(String), expect.any(Number)
+  ), { timeout: 4000 });
   expect(mockGetRide).toHaveBeenCalledWith('0x' + '1'.repeat(64));
 });
 
@@ -95,7 +100,7 @@ test('RA-B16-002: only Completed (5) and Cancelled (6) rides shown; in-progress 
   const rideCancelled  = '0x' + '2'.repeat(64);
   const rideInProgress = '0x' + '3'.repeat(64);
 
-  mockGetStoredRideIds.mockResolvedValue([rideCompleted, rideCancelled, rideInProgress]);
+  mockScanChainForRideIds.mockResolvedValue([rideCompleted, rideCancelled, rideInProgress]);
   mockGetRide
     .mockResolvedValueOnce(makeFakeRide(5, NOW - 3600)) // Completed
     .mockResolvedValueOnce(makeFakeRide(6, NOW - 7200)) // Cancelled
@@ -112,8 +117,7 @@ test('RA-B16-003: rides displayed newest-first regardless of storage order', asy
   const olderRideId = '0x' + '1'.repeat(64);
   const newerRideId = '0x' + '2'.repeat(64);
 
-  // Older stored first (storage order shouldn't matter)
-  mockGetStoredRideIds.mockResolvedValue([olderRideId, newerRideId]);
+  mockScanChainForRideIds.mockResolvedValue([olderRideId, newerRideId]);
   mockGetRide
     .mockResolvedValueOnce(makeFakeRide(5, NOW - 7200, BigInt('1000000000000000000')))  // older, 1 POL
     .mockResolvedValueOnce(makeFakeRide(5, NOW - 3600, BigInt('2000000000000000000'))); // newer, 2 POL
@@ -121,8 +125,6 @@ test('RA-B16-003: rides displayed newest-first regardless of storage order', asy
   const { getAllByTestId } = await render(<RideHistoryScreen navigation={NAV} />);
   await waitFor(() => expect(getAllByTestId(/^history-item-/).length).toBeGreaterThanOrEqual(2), { timeout: 4000 });
 
-  // Newer ride (2 POL × $0.50 = $1.00) should be at index 0
-  // $1.00 appears in both Fare and You paid columns for completed rides
   const items = getAllByTestId(/^history-item-/);
   expect(within(items[0]).getAllByText('$1.00').length).toBeGreaterThan(0);
 });
@@ -131,7 +133,7 @@ test('RA-B16-003: rides displayed newest-first regardless of storage order', asy
 test('RA-B16-004a: PAGE_SIZE=4 shows first 4 of 6 rides; load-more reveals the rest', async () => {
   process.env.EXPO_PUBLIC_HISTORY_PAGE_SIZE = '4';
   const rideIds = Array.from({ length: 6 }, (_, i) => '0x' + String(i + 1).padStart(64, '0'));
-  mockGetStoredRideIds.mockResolvedValue(rideIds);
+  mockScanChainForRideIds.mockResolvedValue(rideIds);
   rideIds.forEach((_, i) => {
     mockGetRide.mockResolvedValueOnce(makeFakeRide(5, NOW - (i + 1) * 600));
   });
@@ -150,7 +152,7 @@ test('RA-B16-004a: PAGE_SIZE=4 shows first 4 of 6 rides; load-more reveals the r
 test('RA-B16-004b: PAGE_SIZE=10 shows all 6 rides without a load-more button', async () => {
   process.env.EXPO_PUBLIC_HISTORY_PAGE_SIZE = '10';
   const rideIds = Array.from({ length: 6 }, (_, i) => '0x' + String(i + 1).padStart(64, '0'));
-  mockGetStoredRideIds.mockResolvedValue(rideIds);
+  mockScanChainForRideIds.mockResolvedValue(rideIds);
   rideIds.forEach((_, i) => {
     mockGetRide.mockResolvedValueOnce(makeFakeRide(5, NOW - (i + 1) * 600));
   });
@@ -163,22 +165,21 @@ test('RA-B16-004b: PAGE_SIZE=10 shows all 6 rides without a load-more button', a
 
 // ── RA-B16-005 ─────────────────────────────────────────────────────────────────
 test('RA-B16-005: per-ride card shows local value as fare hero + POL muted; "Completed" status', async () => {
-  // 1 POL fare: polUsdRate=0.5, forexRate=1.0 → $0.50
-  mockGetStoredRideIds.mockResolvedValue(['0x' + '1'.repeat(64)]);
+  mockScanChainForRideIds.mockResolvedValue(['0x' + '1'.repeat(64)]);
   mockGetRide.mockResolvedValue(makeFakeRide(5, NOW - 3600, BigInt('1000000000000000000')));
 
   const { getByTestId, getAllByText } = await render(<RideHistoryScreen navigation={NAV} />);
   await waitFor(() => expect(getByTestId('history-item-0')).toBeTruthy(), { timeout: 4000 });
 
   expect(getByTestId('fare-local-hero')).toBeTruthy();
-  // $0.50 appears in Fare + You paid columns
   expect(getAllByText('$0.50').length).toBeGreaterThanOrEqual(1);
   expect(getAllByText('1.0000 POL').length).toBeGreaterThanOrEqual(1);
   expect(getAllByText('Completed').length).toBeGreaterThanOrEqual(1);
 });
 
 // ── RA-B16-006 ─────────────────────────────────────────────────────────────────
-test('RA-B16-006: empty state rendered when no stored ride IDs', async () => {
+test('RA-B16-006: empty state when chain and storage both empty', async () => {
+  mockScanChainForRideIds.mockResolvedValue([]);
   mockGetStoredRideIds.mockResolvedValue([]);
   const { getByTestId } = await render(<RideHistoryScreen navigation={NAV} />);
   await waitFor(() => expect(getByTestId('empty-state')).toBeTruthy(), { timeout: 4000 });

@@ -7,7 +7,7 @@ import { ethers } from "ethers";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getPolUsdFromOracle } from "../services/chainlinkOracle";
 import { fetchForexRates, polToLocal, formatLocal } from "../services/currencyService";
-import { getStoredRideIds } from "../services/rideHistoryService";
+import { getStoredRideIds, scanChainForRideIds } from "../services/rideHistoryService";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors } from "../theme";
 
@@ -44,16 +44,13 @@ export const RideHistoryScreen = ({ navigation }: any) => {
   const [currency,     setCurrency]     = useState("USD");
 
   const loadHistory = useCallback(async () => {
-    const ESCROW_ADDR = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS ?? "";
-    const RPC_URL     = process.env.EXPO_PUBLIC_ALCHEMY_URL ?? "";
+    const ESCROW_ADDR  = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS ?? "";
+    const RPC_URL      = process.env.EXPO_PUBLIC_ALCHEMY_URL ?? "";
+    const START_BLOCK  = parseInt(process.env.EXPO_PUBLIC_HISTORY_START_BLOCK ?? "88470000", 10);
     setLoading(true);
     try {
       const riderAddr = await AsyncStorage.getItem("rider_wallet_address");
-
-      const storedIds = await getStoredRideIds();
-      if (storedIds.length === 0) { setLoading(false); return; }
-
-      if (!RPC_URL || !ESCROW_ADDR) { setLoading(false); return; }
+      if (!riderAddr || !ESCROW_ADDR || !RPC_URL) { setLoading(false); return; }
 
       const cur = await AsyncStorage.getItem("app_currency") ?? "USD";
       setCurrency(cur);
@@ -67,9 +64,17 @@ export const RideHistoryScreen = ({ navigation }: any) => {
         setForexRate(rates.value[cur]);
       }
 
+      // Chain scan (source of truth) + local cache merged, deduplicated
+      const [chainIds, storedIds] = await Promise.all([
+        scanChainForRideIds(riderAddr, "rider", ESCROW_ADDR, START_BLOCK),
+        getStoredRideIds(),
+      ]);
+      const allIds = [...new Set([...chainIds, ...storedIds])];
+      if (allIds.length === 0) { setLoading(false); return; }
+
       const provider = new ethers.JsonRpcProvider(RPC_URL);
       const contract = new ethers.Contract(ESCROW_ADDR, GET_RIDE_ABI, provider);
-      const results  = await Promise.allSettled(storedIds.map(id => contract.getRide(id)));
+      const results  = await Promise.allSettled(allIds.map(id => contract.getRide(id)));
 
       const entries: RideEntry[] = [];
       for (let i = 0; i < results.length; i++) {
@@ -78,10 +83,9 @@ export const RideHistoryScreen = ({ navigation }: any) => {
         const d      = r.value;
         const status = Number(d[10]);
         if (status !== STATUS_COMPLETED && status !== STATUS_CANCELLED) continue;
-        // If we have a rider address, verify this ride belongs to them
-        if (riderAddr && (d[0] as string).toLowerCase() !== riderAddr.toLowerCase()) continue;
+        if ((d[0] as string).toLowerCase() !== riderAddr.toLowerCase()) continue;
         entries.push({
-          rideId:          storedIds[i],
+          rideId:          allIds[i],
           driver:          d[1] as string,
           fare:            d[4] as bigint,
           status,
