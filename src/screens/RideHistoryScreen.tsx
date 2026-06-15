@@ -7,18 +7,15 @@ import { ethers } from "ethers";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getPolUsdFromOracle } from "../services/chainlinkOracle";
 import { fetchForexRates, polToLocal, formatLocal } from "../services/currencyService";
+import { getStoredRideIds } from "../services/rideHistoryService";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors } from "../theme";
 
-const ESCROW_ADDR = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS ?? "";
-const RPC_URL     = process.env.EXPO_PUBLIC_ALCHEMY_URL ?? "";
-const LOG_CHUNK   = 2000;
 
 const GET_RIDE_ABI = [
-  "function getRide(bytes32) external view returns (address, address, address, address, uint256, bytes32, bytes32, bytes32, uint256, uint256, uint8, uint256, uint256, uint256, uint256, uint256, uint256, uint8, address)",
+  "function getRide(bytes32) external view returns (address,address,address,address,uint256,bytes32,bytes32,bytes32,uint256,uint256,uint8,uint256,uint256,uint256,uint256,uint256,uint256,uint8,address)",
 ];
 
-const RIDE_CREATED_SIG = "RideCreated(bytes32,address,address,uint256)";
 const STATUS_COMPLETED = 5;
 const STATUS_CANCELLED = 6;
 
@@ -47,10 +44,16 @@ export const RideHistoryScreen = ({ navigation }: any) => {
   const [currency,     setCurrency]     = useState("USD");
 
   const loadHistory = useCallback(async () => {
+    const ESCROW_ADDR = process.env.EXPO_PUBLIC_RIDE_ESCROW_ADDRESS ?? "";
+    const RPC_URL     = process.env.EXPO_PUBLIC_ALCHEMY_URL ?? "";
     setLoading(true);
     try {
-      const addr = await AsyncStorage.getItem("rider_wallet_address");
-      if (!addr || !RPC_URL || !ESCROW_ADDR) { setLoading(false); return; }
+      const riderAddr = await AsyncStorage.getItem("rider_wallet_address");
+
+      const storedIds = await getStoredRideIds();
+      if (storedIds.length === 0) { setLoading(false); return; }
+
+      if (!RPC_URL || !ESCROW_ADDR) { setLoading(false); return; }
 
       const cur = await AsyncStorage.getItem("app_currency") ?? "USD";
       setCurrency(cur);
@@ -59,33 +62,14 @@ export const RideHistoryScreen = ({ navigation }: any) => {
         getPolUsdFromOracle(),
         fetchForexRates(),
       ]);
-      if (polUsd.status  === "fulfilled" && polUsd.value  !== null) setPolUsdRate(polUsd.value);
-      if (rates.status   === "fulfilled" && rates.value   && cur in rates.value) {
+      if (polUsd.status === "fulfilled" && polUsd.value !== null) setPolUsdRate(polUsd.value);
+      if (rates.status === "fulfilled" && rates.value && cur in rates.value) {
         setForexRate(rates.value[cur]);
       }
 
-      const provider    = new ethers.JsonRpcProvider(RPC_URL);
-      const latestBlock = await provider.getBlockNumber();
-      const deployBlock = parseInt(process.env.EXPO_PUBLIC_ESCROW_DEPLOY_BLOCK ?? "0", 10);
-      const fromBlock   = deployBlock > 0 ? deployBlock : Math.max(0, latestBlock - 4_000_000);
-
-      const TOPIC0      = ethers.id(RIDE_CREATED_SIG);
-      const paddedAddr  = "0x" + "000000000000000000000000" + addr.slice(2).toLowerCase();
-      const rideIds: string[] = [];
-
-      for (let from = fromBlock; from <= latestBlock; from += LOG_CHUNK) {
-        const to   = Math.min(from + LOG_CHUNK - 1, latestBlock);
-        const logs = await provider.getLogs({
-          address: ESCROW_ADDR,
-          fromBlock: from,
-          toBlock:   to,
-          topics:    [TOPIC0, null, paddedAddr, null],
-        });
-        for (const log of logs) rideIds.push(log.topics[1]);
-      }
-
+      const provider = new ethers.JsonRpcProvider(RPC_URL);
       const contract = new ethers.Contract(ESCROW_ADDR, GET_RIDE_ABI, provider);
-      const results  = await Promise.allSettled(rideIds.map(id => contract.getRide(id)));
+      const results  = await Promise.allSettled(storedIds.map(id => contract.getRide(id)));
 
       const entries: RideEntry[] = [];
       for (let i = 0; i < results.length; i++) {
@@ -94,12 +78,14 @@ export const RideHistoryScreen = ({ navigation }: any) => {
         const d      = r.value;
         const status = Number(d[10]);
         if (status !== STATUS_COMPLETED && status !== STATUS_CANCELLED) continue;
+        // If we have a rider address, verify this ride belongs to them
+        if (riderAddr && (d[0] as string).toLowerCase() !== riderAddr.toLowerCase()) continue;
         entries.push({
-          rideId:         rideIds[i],
-          driver:         d[1] as string,
-          fare:           d[4] as bigint,
+          rideId:          storedIds[i],
+          driver:          d[1] as string,
+          fare:            d[4] as bigint,
           status,
-          createdAt:      Number(d[11]),
+          createdAt:       Number(d[11]),
           offerMultiplier: Number(d[17]),
         });
       }
@@ -107,7 +93,7 @@ export const RideHistoryScreen = ({ navigation }: any) => {
       setRides(entries.sort((a, b) => b.createdAt - a.createdAt));
       setVisibleCount(PAGE_SIZE);
     } catch (e: any) {
-      console.warn("[History] load error:", e.message);
+      console.warn("[RideHistory] load error:", e.message);
     } finally {
       setLoading(false);
     }

@@ -11,6 +11,7 @@ import { ethers } from "ethers";
 import { useTheme } from "../theme/ThemeContext";
 import { Colors, Shadow } from "../theme";
 import { postRideRequest, pollForAcceptance, clearRelayMessage, generateRideId } from "../services/api";
+import { addRideToHistory } from "../services/rideHistoryService";
 import { getPolUsdFromOracle } from "../services/chainlinkOracle";
 import { fetchForexRates, polToLocal, formatLocal } from "../services/currencyService";
 import { WebRTCGPSAnswerer } from "../services/WebRTCGPS";
@@ -204,8 +205,8 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
         if (s === 2) setStatus("pending_confirmation"); // PendingConfirmation
         if (s === 3) { clearInterval(poll); setStatus("disputed"); }             // Disputed
         if (s === 4) { clearInterval(poll); setStatus("escalated"); }            // Escalated
-        if (s === 5) { clearInterval(poll); setStatus("completed"); }            // Completed
-        if (s === 6) { clearInterval(poll); setStatus("cancelled_by_driver"); } // Cancelled (BUG-33 fix)
+        if (s === 5) { clearInterval(poll); setStatus("completed"); if (rideId) addRideToHistory(rideId).catch(()=>{}); }            // Completed
+        if (s === 6) { clearInterval(poll); setStatus("cancelled_by_driver"); if (rideId) addRideToHistory(rideId).catch(()=>{}); } // Cancelled (BUG-33 fix)
       } catch (e: any) {
         console.warn("[POLL] getRideStatus error:", e.message);
       }
@@ -619,6 +620,7 @@ export const RideProgressScreen = ({ route, navigation }: any) => {
           const escrow   = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, signer);
           const tx = await escrow.cancelRide(rideId);
           await tx.wait();
+          if (rideId) addRideToHistory(rideId).catch(() => {});
           const successMsg = variant === "after_window"
             ? "Ride cancelled. A small fee was deducted from your refund."
             : "Your full fare has been refunded.";
