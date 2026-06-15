@@ -4,7 +4,7 @@
  * RA-O: Offer Selection Tests (10 tests)
  */
 import React from 'react';
-import { render, fireEvent, waitFor, act } from '@testing-library/react-native';
+import { render, fireEvent, waitFor, act, within } from '@testing-library/react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Location from 'expo-location';
@@ -907,4 +907,34 @@ test('RA-RC-003: No persisted rider_active_ride_id → no RideProgress navigatio
   await act(async () => { await new Promise(r => setTimeout(r, 500)); });
 
   expect(NAV.navigate).not.toHaveBeenCalledWith('RideProgress', expect.anything());
+});
+
+// ── RA-B7-001 ─────────────────────────────────────────────────────────────────
+test('RA-B7-001: Recent destinations are sorted nearest-first regardless of storage order', async () => {
+  // Rider at (39.76, -84.19)
+  (Location.getCurrentPositionAsync as jest.Mock).mockResolvedValue({
+    coords: { latitude: 39.76, longitude: -84.19, accuracy: 5, timestamp: Date.now() },
+    timestamp: Date.now(),
+  });
+
+  // Stored newest-first: Far, Medium, Near — so un-sorted display order would show Far first
+  (AsyncStorage.getItem as jest.Mock).mockImplementation((k: string) => {
+    if (k === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
+    if (k === 'recent_destinations') return Promise.resolve(JSON.stringify([
+      { name: 'Far Dest',    address: 'Far, City',  lat: 40.76, lng: -84.19, savedAt: Date.now() },         // ~111 km
+      { name: 'Medium Dest', address: 'Med, City',  lat: 39.86, lng: -84.19, savedAt: Date.now() - 1000 },  // ~11 km
+      { name: 'Near Dest',   address: 'Near, City', lat: 39.78, lng: -84.19, savedAt: Date.now() - 2000 },  // ~2 km
+    ]));
+    return Promise.resolve(null);
+  });
+
+  const { getByTestId } = await render(<HomeScreen navigation={NAV} />);
+
+  // waitFor retries until riderLoc state is set and the proximity sort re-renders.
+  // After sort: Near (2 km) → Medium (11 km) → Far (111 km)
+  await waitFor(() => {
+    expect(within(getByTestId('recent-dest-0')).getByText('Near Dest')).toBeTruthy();
+    expect(within(getByTestId('recent-dest-1')).getByText('Medium Dest')).toBeTruthy();
+    expect(within(getByTestId('recent-dest-2')).getByText('Far Dest')).toBeTruthy();
+  }, { timeout: 3000 });
 });

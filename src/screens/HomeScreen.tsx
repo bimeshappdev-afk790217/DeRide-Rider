@@ -859,7 +859,13 @@ export const HomeScreen = ({ navigation }: any) => {
         {suggestions.length === 0 && destination.length === 0 && recentDests.length > 0 && (
           <View style={[styles.suggestList, { backgroundColor: colors.surface, borderColor: colors.border }]}>
             <Text style={[styles.recentHeader, { color: colors.textMuted }]}>🕐  Recent</Text>
-            {recentDests.map((item, i) => {
+            {[...recentDests]
+              .sort((a, b) => {
+                if (!riderLoc) return 0;
+                return haversineKm(riderLoc.lat, riderLoc.lng, a.lat, a.lng)
+                     - haversineKm(riderLoc.lat, riderLoc.lng, b.lat, b.lng);
+              })
+              .map((item, i) => {
               const distText = riderLoc
                 ? (() => {
                     const mi = haversineKm(riderLoc.lat, riderLoc.lng, item.lat, item.lng) * 0.621;
@@ -868,7 +874,8 @@ export const HomeScreen = ({ navigation }: any) => {
                 : '';
               return (
                 <TouchableOpacity
-                  key={i}
+                  key={item.name + item.lat}
+                  testID={`recent-dest-${i}`}
                   style={[styles.suggestItem, { borderBottomColor: colors.border }]}
                   onPress={() => searchDrivers(item.address, { lat: item.lat, lng: item.lng })}
                 >
