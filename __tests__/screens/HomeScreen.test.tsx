@@ -988,25 +988,28 @@ test('RA-MP-002: Google key present → no OSM UrlTile, Google mapType used', as
 });
 
 // ── RA-MP-003 ─────────────────────────────────────────────────────────────────
-test('RA-MP-003: No key + fitToCoordinates throws → bounding region computed, map still shows', async () => {
-  // fitToCoordinates throws (simulates OSM provider or SDK not ready)
+test('RA-MP-003: No key → fitToCoordinates never called, bounding region set directly in JS', async () => {
+  // In OSM mode (no Google key), fitToCoordinates is skipped entirely — the native
+  // call would crash because the GoogleMap object is in auth-failed state and JS
+  // try-catch cannot catch async native thread exceptions.
   const mapMethods = (global as any).mockMapRefMethods;
-  mapMethods.fitToCoordinates.mockImplementationOnce(() => {
-    throw new Error('fitToCoordinates not supported');
-  });
+  mapMethods.fitToCoordinates.mockClear();
+
   setupSearchDestMocks('MP Fallback', 39.90, -84.30);
 
   const { queryByTestId, queryByText } = await render(<HomeScreen navigation={NAV} />);
   await act(async () => { await new Promise(r => setTimeout(r, 200)); });
 
   await act(async () => { fireEvent.press(queryByText('MP Fallback')!); });
-  // Wait past 350ms to let the catch block compute mapRegion
+  // Wait past 350ms (the old setTimeout threshold) to confirm fitToCoordinates is still not called
   await act(async () => { await new Promise(r => setTimeout(r, 500)); });
 
-  // App still renders — map is visible (region fallback kicked in)
+  // App still renders — map visible
   expect(queryByTestId('map-view')).toBeTruthy();
   // OSM tile rendered (no key path)
   expect(queryByTestId('osm-url-tile')).toBeTruthy();
+  // fitToCoordinates was NOT called — crash path completely avoided
+  expect(mapMethods.fitToCoordinates).not.toHaveBeenCalled();
 });
 
 // ── RA-MP-004 ─────────────────────────────────────────────────────────────────
@@ -1031,14 +1034,13 @@ test('RA-MP-004: No key path — destination select works end-to-end (B.2.2 stay
 // ══════════════════════════════════════════════════════════════════
 
 // ── RA-B22-001 ─────────────────────────────────────────────────────────────────
-test('RA-B22-001: fitToCoordinates throws (simulated missing Maps API key) → try-catch prevents crash, UI functional', async () => {
-  // Simulate the production APK crash: fitToCoordinates throws because Google Maps SDK
-  // is not initialized (no API key in AndroidManifest). Without the try-catch fix, this
-  // would propagate as a fatal error.
+test('RA-B22-001: No API key (OSM mode) → fitToCoordinates never called → destination select survives, UI functional', async () => {
+  // Root-cause fix: when HAS_GOOGLE_MAPS_KEY is false, the useEffect skips the
+  // fitToCoordinates native call entirely. The native GoogleMap is in auth-failed
+  // state (no key in AndroidManifest) and the async Java exception it would throw
+  // cannot be caught by a JS try-catch. Skipping the call eliminates the crash path.
   const mapMethods = (global as any).mockMapRefMethods;
-  mapMethods.fitToCoordinates.mockImplementationOnce(() => {
-    throw new Error('Maps SDK not initialized — missing API key');
-  });
+  mapMethods.fitToCoordinates.mockClear();
 
   (AsyncStorage.getItem as jest.Mock).mockImplementation((key: string) => {
     if (key === 'rider_wallet_address') return Promise.resolve(RIDER_ADDR);
@@ -1069,12 +1071,14 @@ test('RA-B22-001: fitToCoordinates throws (simulated missing Maps API key) → t
   const { queryByText } = await render(<HomeScreen navigation={NAV} />);
   await act(async () => { await new Promise(r => setTimeout(r, 200)); });
 
-  // Tap destination — triggers setSearching(true) → MapView mounts → fitToCoordinates called after 350ms
+  // Tap destination — triggers setSearching(true) → MapView mounts
   await act(async () => { fireEvent.press(queryByText('Crash Test Dest')!); });
-  // Wait past the 350ms setTimeout to let fitToCoordinates be called (and throw)
+  // Wait well past the old 350ms fitToCoordinates threshold
   await act(async () => { await new Promise(r => setTimeout(r, 500)); });
 
-  // App is still functional — drivers shown, not a blank/crashed screen
+  // fitToCoordinates was never called (OSM path skips the native call)
+  expect(mapMethods.fitToCoordinates).not.toHaveBeenCalled();
+  // App is still functional — drivers shown
   await waitFor(() => {
     expect(queryByText('2021 Toyota Camry')).toBeTruthy();
   });
@@ -1123,7 +1127,8 @@ test('RA-B22-002: Both matching server and contract fail → IIFE .catch() preve
 });
 
 // ── RA-B22-003 ─────────────────────────────────────────────────────────────────
-test('RA-B22-003: fitToCoordinates called with rider and destination coords after destination select', async () => {
+test('RA-B22-003: Google key present → fitToCoordinates called with correct coords after destination select', async () => {
+  mockHasGoogleKey = true; // Google Maps path — fitToCoordinates IS called
   const mapMethods = (global as any).mockMapRefMethods;
   mapMethods.fitToCoordinates.mockClear();
 

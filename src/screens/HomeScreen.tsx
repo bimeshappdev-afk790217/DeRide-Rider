@@ -385,11 +385,24 @@ export const HomeScreen = ({ navigation }: any) => {
   }, [riderLoc, countryCode]);
 
   // Fit map to show both pickup and destination after search starts.
-  // Google path: fitToCoordinates() animates natively.
-  // OSM/no-key path: fitToCoordinates() may throw — catch computes a bounding region
-  // from the two points and sets mapRegion state, which drives the controlled region prop.
+  // Google path: fitToCoordinates() animates natively (only when API key is present).
+  // OSM/no-key path: fitToCoordinates() sends an async command to a GoogleMap object
+  // that is in "authorization failed" state (no key in AndroidManifest) — this triggers
+  // a native Java exception on the UI thread that JS try-catch cannot intercept.
+  // So we skip the native call entirely in OSM mode and compute the bounding region in JS.
   useEffect(() => {
     if (!destCoords || !searching || !riderLoc) return;
+
+    if (!HAS_GOOGLE_MAPS_KEY) {
+      // Pure JS region computation — no native call, no native crash possible.
+      const midLat   = (riderLoc.lat + destCoords.lat) / 2;
+      const midLng   = (riderLoc.lng + destCoords.lng) / 2;
+      const deltaLat = Math.abs(riderLoc.lat - destCoords.lat) * 1.6 + 0.04;
+      const deltaLng = Math.abs(riderLoc.lng - destCoords.lng) * 1.6 + 0.04;
+      setMapRegion({ latitude: midLat, longitude: midLng, latitudeDelta: deltaLat, longitudeDelta: deltaLng });
+      return;
+    }
+
     const t = setTimeout(() => {
       try {
         mapRef.current?.fitToCoordinates(
@@ -400,10 +413,10 @@ export const HomeScreen = ({ navigation }: any) => {
           { edgePadding: { top: 80, right: 60, bottom: 240, left: 60 }, animated: true }
         );
       } catch {
-        const midLat    = (riderLoc.lat + destCoords.lat) / 2;
-        const midLng    = (riderLoc.lng + destCoords.lng) / 2;
-        const deltaLat  = Math.abs(riderLoc.lat - destCoords.lat) * 1.6 + 0.04;
-        const deltaLng  = Math.abs(riderLoc.lng - destCoords.lng) * 1.6 + 0.04;
+        const midLat   = (riderLoc.lat + destCoords.lat) / 2;
+        const midLng   = (riderLoc.lng + destCoords.lng) / 2;
+        const deltaLat = Math.abs(riderLoc.lat - destCoords.lat) * 1.6 + 0.04;
+        const deltaLng = Math.abs(riderLoc.lng - destCoords.lng) * 1.6 + 0.04;
         setMapRegion({ latitude: midLat, longitude: midLng, latitudeDelta: deltaLat, longitudeDelta: deltaLng });
       }
     }, 350);
