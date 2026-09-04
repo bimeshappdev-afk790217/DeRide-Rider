@@ -47,7 +47,7 @@ Deployed to Polygon mainnet and validated through multi-device field testing aga
 
 ## Author
 
-Built by Bheemesh Taarappagol as an independent project.
+Built by Bheemesh Tarappagol as an independent project.
 
 ## License
 
