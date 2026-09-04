@@ -51,4 +51,4 @@ Built by Bheemesh Tarappagol as an independent project.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+All rights reserved. This source is published for portfolio and evaluation purposes only — see [LICENSE](LICENSE).
